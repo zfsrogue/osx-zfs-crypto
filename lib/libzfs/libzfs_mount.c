@@ -272,6 +272,10 @@ zfs_is_mountable(zfs_handle_t *zhp, char *buf, size_t buflen,
 	    getzoneid() == GLOBAL_ZONEID)
 		return (B_FALSE);
 
+    if (zfs_prop_get_int(zhp, ZFS_PROP_KEYSTATUS) ==
+        ZFS_CRYPT_KEY_UNAVAILABLE)
+        return (B_FALSE);
+
 	if (source)
 		*source = sourcetype;
 
@@ -430,6 +434,16 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 	 */
 	if (zpool_get_prop_int(zhp->zpool_hdl, ZPOOL_PROP_READONLY, NULL))
 		(void) strlcat(mntopts, "," MNTOPT_RO, sizeof (mntopts));
+
+    /*
+     * Load encryption key if required and not already present.
+     * Don't need to check ZFS_PROP_ENCRYPTION because encrypted
+     * datasets have keystatus of ZFS_CRYPT_KEY_NONE.
+     */
+    if (zfs_prop_get_int(zhp, ZFS_PROP_KEYSTATUS) ==
+        ZFS_CRYPT_KEY_UNAVAILABLE) {
+        (void )zfs_key_load(zhp, B_FALSE, B_FALSE, B_FALSE);
+    }
 
 	/*
 	 * Append default mount options which apply to the mount point.
@@ -619,6 +633,29 @@ zfs_unmount(zfs_handle_t *zhp, const char *mountpoint, int flags)
 
     return (0);
 }
+
+/*
+ * mount this filesystem and any children inheriting the mountpoint property.
+ * To do this, just act like we're changing the mountpoint property, but don't
+ * unmount the filesystems first.
+ */
+int
+zfs_mountall(zfs_handle_t *zhp, int mflags)
+{
+    prop_changelist_t *clp;
+    int ret;
+
+    clp = changelist_gather(zhp, ZFS_PROP_MOUNTPOINT,
+                            CL_GATHER_MOUNT_ALWAYS, mflags);
+    if (clp == NULL)
+        return (-1);
+
+    ret = changelist_postfix(clp);
+    changelist_free(clp);
+
+    return (ret);
+}
+
 
 /*
  * Unmount this filesystem and any children inheriting the mountpoint property.
@@ -1081,6 +1118,14 @@ mount_cb(zfs_handle_t *zhp, void *data)
 {
 	get_all_cb_t *cbp = data;
 
+    if (zfs_prop_get_int(zhp, ZFS_PROP_KEYSTATUS) ==
+        ZFS_CRYPT_KEY_UNAVAILABLE) {
+        if (zfs_key_load(zhp, B_FALSE, B_FALSE, B_TRUE) != 0) {
+            zfs_close(zhp);
+            return (0);
+        }
+    }
+
 	if (!(zfs_get_type(zhp) & ZFS_TYPE_FILESYSTEM)) {
 		zfs_close(zhp);
 		return (0);
@@ -1150,6 +1195,15 @@ zpool_enable_datasets(zpool_handle_t *zhp, const char *mntopts, int flags)
 		goto out;
 
 	libzfs_add_handle(&cb, zfsp);
+
+    /*
+     * If the top level dataset is encrypted load its keys.
+     */
+    if (zfs_prop_get_int(zfsp, ZFS_PROP_KEYSTATUS) ==
+        ZFS_CRYPT_KEY_UNAVAILABLE) {
+        (void) zfs_key_load(zfsp, B_FALSE, B_FALSE, B_TRUE);
+    }
+
 	if (zfs_iter_filesystems(zfsp, mount_cb, &cb) != 0)
 		goto out;
 	/*

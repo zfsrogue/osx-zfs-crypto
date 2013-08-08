@@ -36,6 +36,7 @@
 #include <sys/spa_impl.h>
 #include <sys/zio.h>
 #include <sys/zio_checksum.h>
+#include <sys/zio_crypt.h>
 #include <sys/dmu.h>
 #include <sys/dmu_tx.h>
 #include <sys/zap.h>
@@ -466,7 +467,7 @@ spa_prop_validate(spa_t *spa, nvlist_t *props)
 
 			if (!error) {
 				objset_t *os;
-				uint64_t compress;
+				uint64_t compress, crypt;
 
 				if (strval == NULL || strval[0] == '\0') {
 					objnum = zpool_prop_default_numeric(
@@ -477,18 +478,22 @@ spa_prop_validate(spa_t *spa, nvlist_t *props)
 				if ((error = dmu_objset_hold(strval,FTAG,&os)))
 					break;
 
-				/* Must be ZPL and not gzip compressed. */
+				/*
+                 * Must be ZPL and not gzip compressed.
+                 */
 
 				if (dmu_objset_type(os) != DMU_OST_ZFS) {
 					error = ENOTSUP;
 				} else if ((error = dsl_prop_get_integer(strval,
 				    zfs_prop_to_name(ZFS_PROP_COMPRESSION),
 				    &compress, NULL)) == 0 &&
-				    !BOOTFS_COMPRESS_VALID(compress)) {
+				    !BOOTFS_COMPRESS_VALID(compress))
 					error = ENOTSUP;
-				} else {
-					objnum = dmu_objset_id(os);
-				}
+
+                if (!error) {
+                    objnum = dmu_objset_id(os);
+                }
+
 				dmu_objset_rele(os, FTAG);
 			}
 			break;
@@ -994,6 +999,9 @@ spa_activate(spa_t *spa, int mode)
 	avl_create(&spa->spa_errlist_last,
 	    spa_error_entry_compare, sizeof (spa_error_entry_t),
 	    offsetof(spa_error_entry_t, se_avl));
+
+    zcrypt_keystore_init(spa);
+
 }
 
 /*
@@ -1034,6 +1042,8 @@ spa_deactivate(spa_t *spa)
 	 * still have errors left in the queues.  Empty them just in case.
 	 */
 	spa_errlog_drain(spa);
+
+    zcrypt_keystore_fini(spa);
 
 	avl_destroy(&spa->spa_errlist_scrub);
 	avl_destroy(&spa->spa_errlist_last);
@@ -3290,7 +3300,7 @@ spa_l2cache_drop(spa_t *spa)
  */
 int
 spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
-    const char *history_str, nvlist_t *zplprops)
+    const char *history_str, struct dsl_crypto_ctx *dcc, nvlist_t *zplprops)
 {
 	spa_t *spa;
 	char *altroot = NULL;
@@ -3418,7 +3428,7 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 	}
 
 	spa->spa_is_initializing = B_TRUE;
-	spa->spa_dsl_pool = dp = dsl_pool_create(spa, zplprops, txg);
+	spa->spa_dsl_pool = dp = dsl_pool_create(spa, dcc, zplprops, txg);
 	spa->spa_meta_objset = dp->dp_meta_objset;
 	spa->spa_is_initializing = B_FALSE;
 

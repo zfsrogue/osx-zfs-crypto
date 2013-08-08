@@ -49,61 +49,78 @@
 
 #include <sys/zvol.h>
 
+/*
+ * dmu_ot:
+ *
+ * Guidance on when to say TRUE for encryption:
+ *
+ *      User Created Data, file contents
+ *      User Identifying Data, eg ACL
+ *      Indirect User Identifying Data, FUID table
+ *
+ * What can't be encrypted:
+ *      Metadata needed to traverse the pool/datasets for resilver/scrub
+ *      Metadata needed to find datasets for mounting
+ *      Properties - encryption, keysource are properties.
+ *      User properties
+ */
 const dmu_object_type_info_t dmu_ot[DMU_OT_NUMTYPES] = {
-	{	DMU_BSWAP_UINT8,	TRUE,	"unallocated"		},
-	{	DMU_BSWAP_ZAP,		TRUE,	"object directory"	},
-	{	DMU_BSWAP_UINT64,	TRUE,	"object array"		},
-	{	DMU_BSWAP_UINT8,	TRUE,	"packed nvlist"		},
-	{	DMU_BSWAP_UINT64,	TRUE,	"packed nvlist size"	},
-	{	DMU_BSWAP_UINT64,	TRUE,	"bpobj"			},
-	{	DMU_BSWAP_UINT64,	TRUE,	"bpobj header"		},
-	{	DMU_BSWAP_UINT64,	TRUE,	"SPA space map header"	},
-	{	DMU_BSWAP_UINT64,	TRUE,	"SPA space map"		},
-	{	DMU_BSWAP_UINT64,	TRUE,	"ZIL intent log"	},
-	{	DMU_BSWAP_DNODE,	TRUE,	"DMU dnode"		},
-	{	DMU_BSWAP_OBJSET,	TRUE,	"DMU objset"		},
-	{	DMU_BSWAP_UINT64,	TRUE,	"DSL directory"		},
-	{	DMU_BSWAP_ZAP,		TRUE,	"DSL directory child map"},
-	{	DMU_BSWAP_ZAP,		TRUE,	"DSL dataset snap map"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"DSL props"		},
-	{	DMU_BSWAP_UINT64,	TRUE,	"DSL dataset"		},
-	{	DMU_BSWAP_ZNODE,	TRUE,	"ZFS znode"		},
-	{	DMU_BSWAP_OLDACL,	TRUE,	"ZFS V0 ACL"		},
-	{	DMU_BSWAP_UINT8,	FALSE,	"ZFS plain file"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"ZFS directory"		},
-	{	DMU_BSWAP_ZAP,		TRUE,	"ZFS master node"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"ZFS delete queue"	},
-	{	DMU_BSWAP_UINT8,	FALSE,	"zvol object"		},
-	{	DMU_BSWAP_ZAP,		TRUE,	"zvol prop"		},
-	{	DMU_BSWAP_UINT8,	FALSE,	"other uint8[]"		},
-	{	DMU_BSWAP_UINT64,	FALSE,	"other uint64[]"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"other ZAP"		},
-	{	DMU_BSWAP_ZAP,		TRUE,	"persistent error log"	},
-	{	DMU_BSWAP_UINT8,	TRUE,	"SPA history"		},
-	{	DMU_BSWAP_UINT64,	TRUE,	"SPA history offsets"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"Pool properties"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"DSL permissions"	},
-	{	DMU_BSWAP_ACL,		TRUE,	"ZFS ACL"		},
-	{	DMU_BSWAP_UINT8,	TRUE,	"ZFS SYSACL"		},
-	{	DMU_BSWAP_UINT8,	TRUE,	"FUID table"		},
-	{	DMU_BSWAP_UINT64,	TRUE,	"FUID table size"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"DSL dataset next clones"},
-	{	DMU_BSWAP_ZAP,		TRUE,	"scan work queue"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"ZFS user/group used"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"ZFS user/group quota"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"snapshot refcount tags"},
-	{	DMU_BSWAP_ZAP,		TRUE,	"DDT ZAP algorithm"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"DDT statistics"	},
-	{	DMU_BSWAP_UINT8,	TRUE,	"System attributes"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"SA master node"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"SA attr registration"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"SA attr layouts"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"scan translations"	},
-	{	DMU_BSWAP_UINT8,	FALSE,	"deduplicated block"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"DSL deadlist map"	},
-	{	DMU_BSWAP_UINT64,	TRUE,	"DSL deadlist map hdr"	},
-	{	DMU_BSWAP_ZAP,		TRUE,	"DSL dir clones"	},
-	{	DMU_BSWAP_UINT64,	TRUE,	"bpobj subobj"		}
+    /* byte_swap_function       meta    encrypt name                    */
+	{	DMU_BSWAP_UINT8,	TRUE,   FALSE,	"unallocated"	},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"object directory"},
+	{	DMU_BSWAP_UINT64,	TRUE,   FALSE,	"object array"	},
+	{	DMU_BSWAP_UINT8,	TRUE,   FALSE,	"packed nvlist"	},
+	{	DMU_BSWAP_UINT64,	TRUE,   FALSE,	"packed nvlist size"},
+	{	DMU_BSWAP_UINT64,	TRUE,   FALSE,	"bpobj"		},
+	{	DMU_BSWAP_UINT64,	TRUE,   FALSE,	"bpobj header"	},
+	{	DMU_BSWAP_UINT64,	TRUE,   FALSE,	"SPA space map header"},
+	{	DMU_BSWAP_UINT64,	TRUE,   FALSE,	"SPA space map"	},
+	{	DMU_BSWAP_UINT64,	TRUE,   TRUE,	"ZIL intent log"},
+	{	DMU_BSWAP_DNODE,	TRUE,   FALSE,	"DMU dnode"	},
+	{	DMU_BSWAP_OBJSET,	TRUE,   FALSE,	"DMU objset"	},
+	{	DMU_BSWAP_UINT64,	TRUE,   FALSE,	"DSL directory"	},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"DSL directory child map"},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"DSL dataset snap map"},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"DSL props"	},
+	{	DMU_BSWAP_UINT64,	TRUE,   FALSE,	"DSL dataset"	},
+	{	DMU_BSWAP_ZNODE,	TRUE,   TRUE,	"ZFS znode"	},
+	{	DMU_BSWAP_OLDACL,	TRUE,   TRUE,	"ZFS V0 ACL"	},
+	{	DMU_BSWAP_UINT8,	FALSE,  TRUE,	"ZFS plain file"},
+	{	DMU_BSWAP_ZAP,		TRUE,   TRUE,	"ZFS directory"	},
+	{	DMU_BSWAP_ZAP,		TRUE,   TRUE,	"ZFS master node"},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"ZFS delete queue"},
+	{	DMU_BSWAP_UINT8,	FALSE,  TRUE,	"zvol object"	},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"zvol prop"	},
+	{	DMU_BSWAP_UINT8,	FALSE,  TRUE,	"other uint8[]"	},
+	{	DMU_BSWAP_UINT64,	FALSE,  TRUE,	"other uint64[]"},
+	{	DMU_BSWAP_ZAP,		TRUE,   TRUE,	"other ZAP"	},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"persistent error log"},
+	{	DMU_BSWAP_UINT8,	TRUE,   FALSE,	"SPA history"	},
+	{	DMU_BSWAP_UINT64,	TRUE,   FALSE,	"SPA history offsets"},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"Pool properties"},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"DSL permissions"},
+	{	DMU_BSWAP_ACL,		TRUE,   TRUE,	"ZFS ACL"	},
+	{	DMU_BSWAP_UINT8,	TRUE,   TRUE,	"ZFS SYSACL"	},
+	{	DMU_BSWAP_UINT8,	TRUE,   TRUE,	"FUID table"	},
+	{	DMU_BSWAP_UINT64,	TRUE,   FALSE,	"FUID table size"},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"DSL dataset next clones"},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"scan work queue"},
+	{	DMU_BSWAP_ZAP,		TRUE,   TRUE,	"ZFS user/group used"},
+	{	DMU_BSWAP_ZAP,		TRUE,   TRUE,	"ZFS user/group quota"},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"snapshot refcount tags"},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"DDT ZAP algorithm"},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"DDT statistics"},
+	{	DMU_BSWAP_UINT8,	TRUE,   TRUE,	"System attributes"},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"SA master node"},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"SA attr registration"},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"SA attr layouts"},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"scan translations"},
+	{	DMU_BSWAP_UINT8,	FALSE,  FALSE,	"deduplicated block"},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"DSL deadlist map"},
+	{	DMU_BSWAP_UINT64,	TRUE,   FALSE,	"DSL deadlist map hdr"},
+	{	DMU_BSWAP_ZAP,		TRUE,   FALSE,	"DSL dir clones"},
+	{	DMU_BSWAP_UINT64,	TRUE,   FALSE,	"bpobj subobj"	},
+	{	DMU_BSWAP_ZAP,		TRUE,   TRUE,   "DSL keychain"	},
 };
 
 const dmu_object_byteswap_info_t dmu_ot_byteswap[DMU_BSWAP_NUMFUNCS] = {
@@ -1909,6 +1926,7 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 	    (wp & WP_SPILL));
 	enum zio_checksum checksum = os->os_checksum;
 	enum zio_compress compress = os->os_compress;
+    enum zio_crypt crypt = os->os_crypt;
 	enum zio_checksum dedup_checksum = os->os_dedup_checksum;
 	boolean_t dedup;
 	boolean_t dedup_verify = os->os_dedup_verify;
@@ -1959,6 +1977,20 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 			dedup_verify = 1;
 	}
 
+    /*
+     * Determine encryption setting.
+     * This has to be after checksum and dedup selection because it
+     * will override checksum when encryption is enabled.
+     */
+    if (dmu_ot[type].ot_encrypt && level == 0) {
+        if (crypt != ZIO_CRYPT_OFF)
+            checksum = ZIO_CHECKSUM_SHA256_MAC;
+    } else {
+        crypt = ZIO_CRYPT_OFF;
+        if (checksum == ZIO_CHECKSUM_SHA256_MAC)
+            checksum = ZIO_CHECKSUM_SHA256;
+    }
+
 	if (wp & WP_DMU_SYNC)
 		dedup = 0;
 
@@ -1966,14 +1998,21 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 		ASSERT(!ismd && level == 0);
 		checksum = ZIO_CHECKSUM_OFF;
 		compress = ZIO_COMPRESS_OFF;
+        crypt = ZIO_CRYPT_OFF;
 		dedup = B_FALSE;
 	}
 
 	zp->zp_checksum = checksum;
 	zp->zp_compress = compress;
+    zp->zp_crypt = crypt;
 	zp->zp_type = (wp & WP_SPILL) ? dn->dn_bonustype : type;
 	zp->zp_level = level;
 	zp->zp_copies = MIN(copies + ismd, spa_max_replication(os->os_spa));
+    /* Max copies for encrypted datasets is 2 */
+    if (crypt != ZIO_CRYPT_OFF) {
+        zp->zp_copies = MIN(zp->zp_copies,
+                            spa_max_replication(os->os_spa) - 1);
+    }
 	zp->zp_dedup = dedup;
 	zp->zp_dedup_verify = dedup && dedup_verify;
 }

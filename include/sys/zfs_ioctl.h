@@ -34,6 +34,7 @@
 #include <sys/conf.h>
 #include <sys/systm.h>
 #include <miscfs/devfs/devfs.h>
+#include <sys/zcrypt.h>
 
 #ifdef _KERNEL
 #include <sys/nvpair.h>
@@ -75,12 +76,14 @@ typedef enum drr_headertype {
 #define	DMU_BACKUP_FEATURE_DEDUP	(0x1)
 #define	DMU_BACKUP_FEATURE_DEDUPPROPS	(0x2)
 #define	DMU_BACKUP_FEATURE_SA_SPILL	(0x4)
-
+#define DMU_BACKUP_FEATURE_ENCRYPT      (0x8)
+#define DMU_BACKUP_FEATURE_LABELED      (0x10)
 /*
  * Mask of all supported backup features
  */
 #define	DMU_BACKUP_FEATURE_MASK	(DMU_BACKUP_FEATURE_DEDUP | \
-		DMU_BACKUP_FEATURE_DEDUPPROPS | DMU_BACKUP_FEATURE_SA_SPILL)
+		DMU_BACKUP_FEATURE_DEDUPPROPS | DMU_BACKUP_FEATURE_SA_SPILL | \
+        DMU_BACKUP_FEATURE_ENCRYPT | DMU_BACKUP_FEATURE_LABELED)
 
 /* Are all features in the given flag word currently supported? */
 #define	DMU_STREAM_SUPPORTED(x)	(!((x) & ~DMU_BACKUP_FEATURE_MASK))
@@ -162,7 +165,8 @@ typedef struct dmu_replay_record {
 			uint32_t drr_bonuslen;
 			uint8_t drr_checksumtype;
 			uint8_t drr_compress;
-			uint8_t drr_pad[6];
+            uint8_t drr_crypt;
+			uint8_t drr_pad[5];
 			uint64_t drr_toguid;
 			/* bonus content follows */
 		} drr_object;
@@ -299,6 +303,7 @@ typedef struct zfs_cmd {
 	dmu_objset_stats_t zc_objset_stats;
 	struct drr_begin zc_begin_record;
 	zinject_record_t zc_inject_record;
+    zfs_ioc_crypto_t zc_crypto;
 	boolean_t	zc_defer_destroy;
 	boolean_t	zc_temphold;
 	uint64_t	zc_action_handle;
@@ -379,6 +384,11 @@ typedef enum zfs_ioc {
 	ZFS_IOC_DIFF,
 	ZFS_IOC_TMP_SNAPSHOT,
 	ZFS_IOC_OBJ_TO_STATS,
+	ZFS_IOC_CRYPTO_KEY_LOAD,
+	ZFS_IOC_CRYPTO_KEY_UNLOAD,
+	ZFS_IOC_CRYPTO_KEY_INHERIT,
+	ZFS_IOC_CRYPTO_KEY_CHANGE,
+	ZFS_IOC_CRYPTO_KEY_NEW,
 	ZFS_IOC_EVENTS_NEXT,
 	ZFS_IOC_EVENTS_CLEAR,
 	ZFS_IOC_POOL_REGUID,

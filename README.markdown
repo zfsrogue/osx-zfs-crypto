@@ -1,101 +1,74 @@
 
-This is a very early alpha of ZFS on OSX, to be the next generation of MacZFS.
-Test this with the expectation of a kernel panic.
+Welcome to the unofficial zfs-crypto branch.
 
-** zfs.kext depends upon spl.kext, so start with that repository.
+To make it clear, this branch has nothing to do with Sun, Oracle,
+ZFSOnLinux, OpenSolaris, IllumOS, OpenIndiana, SmartOS, FreeBSD etc.
 
-It is tested primarily on Mac OS 10.8.4 and secondarily on 10.6.8, with
-the latest Macports.
+If you run a legacy pool version=30, this branch will let you
+import and upgrade your pool to the standard pool version=5000,
+and it will set feature@encryption for any filesystem using
+encryption.
 
-See https://github.com/zfs-osx/ and http://MacZFS.org/ for more information.
-Note MacZFS's wiki on kernel development and panic decoding.
+It is to aid those who happen to use zfs-crypto with pool version=30
+for the short window that it was available. Before the feature@
+pool version became standard, or when importing pools from Solaris.
 
-```
-# git clone https://github.com/zfs-osx/zfs.git
-```
+The original project without crypto support is available here;
+https://github.com/zfs-osx/zfs
 
-KNOWN ISSUES.
+There are new files,
 
-  https://github.com/zfs-osx/zfs/issues?state=open
+zcrypt.c
+zcrypt.h
+zio_crypt.c
+zio_crypt.h
+dsl_crypto.c
+dsl_crypto.h
+libzfs_crypto.c
+zcrypt_common.c
 
+which are kept "as is" as much as possible, including (possibly
+irrelevant) headers.
 
-Please note that 'llvm-gcc' or 'clang' has to be used for compiling KEXTs.
-Pure 'gcc' will produce instable builds.
+The crypto/api/ header files are from OpenSolaris.
 
-```
- # ./configure CC=clang CXX=clang++
-or
- # ./configure CC=llvm-gcc CXX=llvm-g++
-```
+The crypto/api implementation is brand new, and supports "bare
+minimum" features as needed by ZFS only.
 
+Current support is in BETA.
 
-
-```
-# ./autogen.sh
-# ./configure CC=clang CXX=clang++ --with-spl=/path/to/your/spl
-# make
-
-# rsync -ar --delete module/zfs/zfs.kext/ /tmp/zfs.kext/
-# chown -R root:wheel /tmp/zfs.kext
-
-# kextload -r /tmp/ -v /tmp/zfs.kext/
-
-Requesting load of /tmp/zfs.kext.
-/tmp/zfs.kext loaded successfully (or already loaded).
-
-: kobj_open_file: "/etc/zfs/zpool.cache", err 0 from vnode_open
-: ZFS: Loaded module v0.6.0-rc12alpha, ZFS pool version 5000, ZFS filesystem version 5
-
-bash-3.2# ls -l /dev/zfs
-crw-rw-rw-  1 root  wheel   33,   0 Feb 27 17:20 /dev/zfs
+Importing a Solaris pool can be done using:
+ Solaris: zpool create -o version=30 -O version=5 thepool $devices...
+ Solaris: zfs create -o encryption=aes-256-ccm thepool/secure
+ Linux: zpool import -N thepool
+ Linux: zpool upgrade thepool
+ Linux: zfs mount thepool/secure
 
 
-# ./zpool.sh status
-no pools available
+* MACs are in use, but compute_mac() is empty, not called?
 
+* All "// FIXME" should be inspected. In particular, known areas
+  which differ are PROP_ALIAS, PROP_INHERIT, crypto vs userquota,
 
-# ./zpool.sh create BOOM /Users/lundman/osx.zfs/diskimage.bin
-zfs_mount: unused options: "defaults,atime,dev,exec,rw,suid,xattr,nomand,zfsutil"
-
-# df -h
-Filesystem      Size   Used  Avail Capacity iused   ifree %iused  Mounted on
-/dev/disk0s2    20Gi   11Gi  8.5Gi    57% 2921478 2237422   57%   /
-BOOM           472Mi   21Ki  472Mi     1%       6  966468    0%   /BOOM
-
-# ls -l /BOOM/
-total 3
-drwx------  2 root  wheel  3 Apr  4 16:44 .fseventsd
-
-# mkdir /BOOM/THIS.DIRECTORY.IS.ON.ZFS
-
-drwxr-xr-x  2 root  wheel  2 Apr  4 16:45 THIS.DIRECTORY.IS.ON.ZFS
-
-# ./cmd.sh zfs umount BOOM
-
-# ./zpool.sh export BOOM
-
-# ./zpool.sh import -d /Users/lundman/osx.zfs/
-   pool: BOOM
-     id: 17559987915944145476
-  state: ONLINE
- action: The pool can be imported using its name or numeric identifier.
- config:
-
-        BOOM                             ONLINE
-          /Users/lundman/pool-image.bin  ONLINE
-
-# ./zpool.sh import -d /Users/lundman/osx.zfs/ BOOM
-
-# ls -l /BOOM/
-total 3
-drwx------  2 root  wheel  3 Apr  4 16:44 .fseventsd
-drwxr-xr-x  2 root  wheel  2 Apr  4 16:45 THIS.DIRECTORY.IS.ON.ZFS
-
-# ./zpool.sh import -d ~/image/ FROMSOLARIS
-NAME          SIZE  ALLOC   FREE    CAP  DEDUP  HEALTH  ALTROOT
-FROMSOLARIS   123M   354K   123M     0%  1.00x  ONLINE  -
-
+* Removed KEY methods "https URI" (requires curl) and pkcs11 types.
 
 ```
+Example 1: Ask for password.
+============================
+# zfs create -o encryption=aes-256-gcm mypool/BOOM
+  Enter passphrase for 'mypool/BOOM':
+  Enter again:
+  kernel: [11266.250594] spl-crypto: Cipher test 'CKM_AES_CCM' -> 'sun-ccm(aes)' successful.
+# zfs list
+  NAME          USED  AVAIL  REFER  MOUNTPOINT
+  mypool        142K   984M    31K  /mypool
+  mypool/BOOM    31K   984M    31K  /mypool/BOOM
 
-- lundman
+# zpool get all mypool
+
+mypool  feature@async_destroy  enabled                local
+mypool  feature@encryption     active                 local
+```
+
+-- rogue
+

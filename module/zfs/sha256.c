@@ -125,3 +125,31 @@ zio_checksum_SHA256(const void *buf, uint64_t size, zio_cksum_t *zcp)
 	    (uint64_t)H[4] << 32 | H[5],
 	    (uint64_t)H[6] << 32 | H[7]);
 }
+
+/*
+ * SHA256 truncated at 128 and stored in the the first two words
+ * of the checksum.  The last two words store the MAC.
+ */
+void
+zio_checksum_SHAMAC(const void *buf, uint64_t size, zio_cksum_t *zcp)
+{
+    zio_cksum_t tmp;
+
+    // It is unknown if this function is correct, wrt to Solaris
+#if _KERNEL
+#ifdef ZFS_CRYPTO_VERBOSE
+    printk("SHAMAC called.\n");
+#endif
+#endif
+
+#if 1
+    zio_checksum_SHA256(buf, size, &tmp);
+#else
+    bzero(&tmp, sizeof(tmp));
+#endif
+    zcp->zc_word[0] = BE_64(tmp.zc_word[0]);
+    zcp->zc_word[1] = BE_64(tmp.zc_word[1]);
+
+    BF64_SET(zcp->zc_word[2], 0, 32,
+             BF64_GET(BE_64(tmp.zc_word[2]), 0, 32));
+}

@@ -64,6 +64,7 @@ zfs_SOURCES = \
 	dmu_zfetch.c \
 	dnode.c \
 	dnode_sync.c \
+	dsl_crypto.c \
 	dsl_dataset.c \
 	dsl_deadlist.c \
 	dsl_deleg.c \
@@ -103,6 +104,7 @@ zfs_SOURCES = \
 	zap.c \
 	zap_leaf.c \
 	zap_micro.c \
+	zcrypt.c \
 	zfeature.c \
 	zfeature_common.c \
 	zfs_acl.c \
@@ -128,6 +130,7 @@ zfs_SOURCES = \
 	zio.c \
 	zio_checksum.c \
 	zio_compress.c \
+	zio_crypt.c \
 	zio_inject.c \
 	zle.c \
 	zrlock.c \

@@ -66,6 +66,7 @@
 #include <sys/fs/zfs.h>
 #include <sys/dmu.h>
 #include <sys/dsl_prop.h>
+#include <sys/dsl_crypto.h>
 
 #include <sys/dmu_objset.h>
 #include <sys/dsl_dataset.h>

@@ -77,6 +77,7 @@ zio_checksum_info_t zio_checksum_table[ZIO_CHECKSUM_FUNCTIONS] = {
 	{{fletcher_4_native,	fletcher_4_byteswap},	1, 0, 0, "fletcher4"},
 	{{zio_checksum_SHA256,	zio_checksum_SHA256},	1, 0, 1, "sha256"},
 	{{fletcher_4_native,	fletcher_4_byteswap},	0, 1, 0, "zilog2"},
+    {{zio_checksum_SHAMAC,  zio_checksum_SHAMAC},   1, 0, 1, "sha256-mac"},
 };
 
 enum zio_checksum

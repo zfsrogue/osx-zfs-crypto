@@ -482,7 +482,7 @@ int
 zvol_create_minor(const char *name)
 {
 	zfs_soft_state_t *zs;
-	zvol_state_t *zv;
+	zvol_state_t *zv = NULL;
 	objset_t *os;
 	dmu_object_info_t doi;
 	minor_t minor = 0;
@@ -496,6 +496,12 @@ zvol_create_minor(const char *name)
 	if (zvol_minor_lookup(name) != NULL) {
 		mutex_exit(&zfsdev_state_lock);
 		return (EEXIST);
+	}
+
+	error = dsl_crypto_key_inherit(name);
+	if (error != 0 && error != EEXIST) {
+	  mutex_exit(&zfsdev_state_lock);
+	  return (error);
 	}
 
 	/* lie and say we're read-only */
