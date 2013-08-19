@@ -334,12 +334,12 @@ zio_encrypt_data(int crypt, zcrypt_key_t *key, zbookmark_t *bookmark,
     uint64_t txg, int type, boolean_t dedup, void *src, uint64_t size,
     void **destp, char *mac, char *iv)
 {
-	int err = EIO;
+	int err = EIO, i;
 #if _KERNEL
 	crypto_data_t plaintext, ciphertext;
 	crypto_mechanism_t *mech;
 	iovec_t *srciov = NULL, *dstiov = NULL;
-	uio_t srcuio = { 0 }, dstuio = { 0 };
+	struct uio *srcuio = NULL, *dstuio = NULL;
 	caddr_t dest;
 	uint_t iovcnt;
 	size_t maclen;
@@ -371,6 +371,8 @@ zio_encrypt_data(int crypt, zcrypt_key_t *key, zbookmark_t *bookmark,
 	dest = zio_buf_alloc(size);
 	bzero(dest, size);
 	*destp = dest;
+
+
 	/*
 	 * Note that the size is NOT ciphertext.cd_length because
 	 * for CCM (and similar) mode(s) that includes the MAC, which we
@@ -386,17 +388,35 @@ zio_encrypt_data(int crypt, zcrypt_key_t *key, zbookmark_t *bookmark,
 			err = 0;
 			goto out;
 		}
-		srcuio.uio_iov = srciov;
-		srcuio.uio_iovcnt = iovcnt;
+
+        // Free me
+        srcuio = uio_create( iovcnt,       /* max number of iovecs */
+                             0,            /* current offset */
+                             UIO_SYSSPACE,     /* type of address space */
+                             UIO_READ);    /* read or write flag */
+
+		//srcuio.uio_iov = srciov;
+        for (i = 0; i < iovcnt; i++)
+            uio_addiov(srcuio, (user_addr_t)srciov[i].iov_base, srciov[i].iov_len);
+		//srcuio.uio_iovcnt = iovcnt;
 		plaintext.cd_format = CRYPTO_DATA_UIO;
 		plaintext.cd_offset = 0;
-		plaintext.cd_uio = &srcuio;
+		plaintext.cd_uio = srcuio;
 		plaintext.cd_miscdata = NULL;
 
 		dstiov[iovcnt].iov_base = mac;
 		dstiov[iovcnt].iov_len = maclen;
-		dstuio.uio_iov = dstiov;
-		dstuio.uio_iovcnt = iovcnt + 1;
+
+        // Free me
+        dstuio = uio_create( iovcnt + 1,       /* max number of iovecs */
+                             0,                /* current offset */
+                             UIO_SYSSPACE,     /* type of address space */
+                             UIO_WRITE);       /* read or write flag */
+
+		//dstuio.uio_iov = dstiov;
+        for (i = 0; i < iovcnt+1; i++)
+            uio_addiov(dstuio, (user_addr_t)dstiov[i].iov_base, dstiov[i].iov_len);
+		//dstuio.uio_iovcnt = iovcnt + 1;
 		ciphertext.cd_length = plaintext.cd_length + maclen;
 	} else {
 		dstiov = kmem_alloc(sizeof (iovec_t) * 2, KM_SLEEP);
@@ -408,18 +428,23 @@ zio_encrypt_data(int crypt, zcrypt_key_t *key, zbookmark_t *bookmark,
 		dstiov[0].iov_len = size;
 		dstiov[1].iov_base = mac;
 		dstiov[1].iov_len = maclen;
-		dstuio.uio_iov = dstiov;
-		dstuio.uio_iovcnt = 2;
+
+        // Free me
+        dstuio = uio_create( 2,                /* max number of iovecs */
+                             0,                /* current offset */
+                             UIO_SYSSPACE,     /* type of address space */
+                             UIO_WRITE);       /* read or write flag */
+        for (i = 0; i < 2; i++)
+            uio_addiov(dstuio, (user_addr_t)dstiov[i].iov_base, dstiov[i].iov_len);
+
+		//dstuio.uio_iov = dstiov;
+		//dstuio.uio_iovcnt = 2;
 		ciphertext.cd_length = size + maclen;
 	}
-#ifdef _KERNEL
-	srcuio.uio_segflg = dstuio.uio_segflg = UIO_SYSSPACE;
-#else
-	srcuio.uio_segflg = dstuio.uio_segflg = UIO_USERSPACE;
-#endif /* _KERNEL */
+
 	ciphertext.cd_format = CRYPTO_DATA_UIO;
 	ciphertext.cd_offset = 0;
-	ciphertext.cd_uio = &dstuio;
+	ciphertext.cd_uio = dstuio;
 	ciphertext.cd_miscdata = NULL;
 
 	/*
@@ -494,15 +519,22 @@ out:
 	kmem_free(srccopy, size);
 #endif /* _DEBUG */
 	if (srciov != NULL) {
-		kmem_free(srciov, sizeof (iovec_t) * srcuio.uio_iovcnt);
+		kmem_free(srciov, sizeof (iovec_t) * uio_iovcnt(srcuio));
 	}
 	if (dstiov != NULL) {
-		kmem_free(dstiov, sizeof (iovec_t) * dstuio.uio_iovcnt);
+		kmem_free(dstiov, sizeof (iovec_t) * uio_iovcnt(dstuio));
 	}
 	if (lsrc) {
 		kmem_free(src, size);
 		src = NULL;
 	}
+
+
+    if (srcuio)
+        uio_free(srcuio);
+    if (dstuio)
+        uio_free(dstuio);
+
 
 #if _KERNEL
 #ifdef ZFS_CRYPTO_VERBOSE
@@ -525,29 +557,31 @@ zio_decrypt_data(zcrypt_key_t *key, zbookmark_t *bookmark,
     uint64_t txg, int type, void *src, uint64_t srcsize, char *mac, char *iv,
     void *dest, uint64_t destsize)
 {
-	int err = EIO;
+	int err = EIO, i;
 #if _KERNEL
 	crypto_data_t ciphertext, plaintext;
 	crypto_mechanism_t *mech;
 	iovec_t *srciov = NULL, *dstiov = NULL;
-	uio_t srcuio = { 0 }, dstuio = { 0 };
+	struct uio *srcuio = NULL, *dstuio = NULL;
 	size_t maclen;
 	uint_t iovcnt;
 
 	ASSERT3U(destsize, <=, ZIO_CRYPT_MAX_CCM_DATA);
 
-#ifdef _KERNEL
-	srcuio.uio_segflg = dstuio.uio_segflg = UIO_SYSSPACE;
-#else
-	srcuio.uio_segflg = dstuio.uio_segflg = UIO_USERSPACE;
-#endif /* _KERNEL */
+    // Free me
+    srcuio = uio_create( iovcnt,           /* max number of iovecs */
+                         0,                /* current offset */
+                         UIO_SYSSPACE,     /* type of address space */
+                         UIO_READ);        /* read or write flag */
+
+
 	ciphertext.cd_format = CRYPTO_DATA_UIO;
 	ciphertext.cd_offset = 0;
-	ciphertext.cd_uio = &srcuio;
+	ciphertext.cd_uio = srcuio;
 	ciphertext.cd_miscdata = NULL;
 	plaintext.cd_format = CRYPTO_DATA_UIO;
 	plaintext.cd_offset = 0;
-	plaintext.cd_uio = &dstuio;
+	plaintext.cd_uio = dstuio;
 	plaintext.cd_miscdata = NULL;
 
 	ASSERT(mac != NULL);
@@ -557,14 +591,36 @@ zio_decrypt_data(zcrypt_key_t *key, zbookmark_t *bookmark,
 		if (iovcnt == 0)
 			return (0);
 		maclen = zio_crypt_table[key->zk_crypt].ci_zil_maclen;
-		dstuio.uio_iovcnt = iovcnt;
-		dstuio.uio_iov = dstiov;
+
+        // Free me
+        dstuio = uio_create( iovcnt,           /* max number of iovecs */
+                             0,                /* current offset */
+                             UIO_SYSSPACE,     /* type of address space */
+                             UIO_WRITE);       /* read or write flag */
+
+
+		//dstuio.uio_iovcnt = iovcnt;
+		//dstuio.uio_iov = dstiov;
+        for (i = 0; i < iovcnt; i++)
+            uio_addiov(dstuio, (user_addr_t)dstiov[i].iov_base, dstiov[i].iov_len);
 
 		ciphertext.cd_length = plaintext.cd_length + maclen;
-		srcuio.uio_iov = srciov;
-		srcuio.uio_iovcnt = iovcnt + 1;
-		srcuio.uio_iov[iovcnt].iov_base = mac;
-		srcuio.uio_iov[iovcnt].iov_len = maclen;
+
+
+        // Free me
+        srcuio = uio_create( iovcnt + 1,       /* max number of iovecs */
+                             0,                /* current offset */
+                             UIO_SYSSPACE,     /* type of address space */
+                             UIO_READ);       /* read or write flag */
+
+		//srcuio.uio_iov = srciov;
+
+		//srcuio.uio_iovcnt = iovcnt + 1;
+		//srcuio.uio_iov[iovcnt].iov_base = mac;
+		//srcuio.uio_iov[iovcnt].iov_len = maclen;
+        for (i = 0; i < iovcnt; i++)
+            uio_addiov(srcuio, (user_addr_t)srciov[i].iov_base, srciov[i].iov_len);
+        uio_addiov(srcuio, (user_addr_t)mac, maclen);
 
 		mech = zio_crypt_setup_mech_gen_iv(key->zk_crypt, type,
 		    B_FALSE, key, txg, bookmark, NULL,
@@ -578,8 +634,19 @@ zio_decrypt_data(zcrypt_key_t *key, zbookmark_t *bookmark,
 		srciov[0].iov_len = srcsize;
 		srciov[1].iov_base = mac;
 		srciov[1].iov_len = maclen;
-		srcuio.uio_iov = srciov;
-		srcuio.uio_iovcnt = 2;
+
+        // Free me
+        srcuio = uio_create( 2,                /* max number of iovecs */
+                             0,                /* current offset */
+                             UIO_SYSSPACE,     /* type of address space */
+                             UIO_READ);        /* read or write flag */
+
+
+		//srcuio.uio_iov = srciov;
+		//srcuio.uio_iovcnt = 2;
+        for (i = 0; i < 2; i++)
+            uio_addiov(srcuio, (user_addr_t)srciov[i].iov_base, srciov[i].iov_len);
+
 		ciphertext.cd_length = srcsize + maclen;
 
 		SET_CRYPTO_DATA(plaintext, dest, destsize);
@@ -630,11 +697,17 @@ retry:
 
 	zio_crypt_free_mech(mech);
 	if (srciov != NULL) {
-		kmem_free(srciov, sizeof (iovec_t) * srcuio.uio_iovcnt);
+		kmem_free(srciov, sizeof (iovec_t) * uio_iovcnt(srcuio));
 	}
 	if (dstiov != NULL) {
-		kmem_free(dstiov, sizeof (iovec_t) * dstuio.uio_iovcnt);
+		kmem_free(dstiov, sizeof (iovec_t) * uio_iovcnt(dstuio));
 	}
+
+    if (srcuio)
+        uio_free(srcuio);
+    if (dstuio)
+        uio_free(dstuio);
+
 #endif
 	return (err);
 }
