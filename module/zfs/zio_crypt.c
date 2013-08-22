@@ -466,7 +466,7 @@ zio_encrypt_data(int crypt, zcrypt_key_t *key, zbookmark_t *bookmark,
 retry:
 #if _KERNEL
 #ifdef ZFS_CRYPTO_VERBOSE
-    printk("zio_crypt 1\n");
+    printf("zio_crypt 1\n");
 #endif
 #endif
 	err = crypto_encrypt(mech, &plaintext, &key->zk_key, key->zk_ctx_tmpl,
@@ -474,7 +474,7 @@ retry:
 
 #if _KERNEL
 #ifdef ZFS_CRYPTO_VERBOSE
-    printk("zio_crypt back with %d\n", err);
+    printf("zio_crypt back with %d\n", err);
 #endif
 
 	switch (err) {
@@ -503,7 +503,7 @@ retry:
 	}
 
 #ifdef ZFS_CRYPTO_VERBOSE
-    printk("zio_crypt free mech\n");
+    printf("zio_crypt free mech\n");
 #endif
 #endif
 
@@ -538,7 +538,7 @@ out:
 
 #if _KERNEL
 #ifdef ZFS_CRYPTO_VERBOSE
-    printk("zio_crypt leaving. %d\n", err);
+    printf("zio_crypt leaving. %d\n", err);
 #endif
 #endif
 
@@ -568,20 +568,14 @@ zio_decrypt_data(zcrypt_key_t *key, zbookmark_t *bookmark,
 
 	ASSERT3U(destsize, <=, ZIO_CRYPT_MAX_CCM_DATA);
 
-    // Free me
-    srcuio = uio_create( iovcnt,           /* max number of iovecs */
-                         0,                /* current offset */
-                         UIO_SYSSPACE,     /* type of address space */
-                         UIO_READ);        /* read or write flag */
-
 
 	ciphertext.cd_format = CRYPTO_DATA_UIO;
 	ciphertext.cd_offset = 0;
-	ciphertext.cd_uio = srcuio;
+	ciphertext.cd_uio = NULL;
 	ciphertext.cd_miscdata = NULL;
 	plaintext.cd_format = CRYPTO_DATA_UIO;
 	plaintext.cd_offset = 0;
-	plaintext.cd_uio = dstuio;
+	plaintext.cd_uio = NULL;
 	plaintext.cd_miscdata = NULL;
 
 	ASSERT(mac != NULL);
@@ -590,36 +584,39 @@ zio_decrypt_data(zcrypt_key_t *key, zbookmark_t *bookmark,
 		    &srciov, &dstiov, &plaintext.cd_length, B_FALSE);
 		if (iovcnt == 0)
 			return (0);
+
 		maclen = zio_crypt_table[key->zk_crypt].ci_zil_maclen;
 
+		//dstuio.uio_iovcnt = iovcnt;
+		//dstuio.uio_iov = dstiov;
         // Free me
         dstuio = uio_create( iovcnt,           /* max number of iovecs */
                              0,                /* current offset */
                              UIO_SYSSPACE,     /* type of address space */
                              UIO_WRITE);       /* read or write flag */
-
-
-		//dstuio.uio_iovcnt = iovcnt;
-		//dstuio.uio_iov = dstiov;
+        plaintext.cd_uio = dstuio;
         for (i = 0; i < iovcnt; i++)
-            uio_addiov(dstuio, (user_addr_t)dstiov[i].iov_base, dstiov[i].iov_len);
+            uio_addiov(dstuio, (user_addr_t)dstiov[i].iov_base,
+                       dstiov[i].iov_len);
 
 		ciphertext.cd_length = plaintext.cd_length + maclen;
 
-
-        // Free me
-        srcuio = uio_create( iovcnt + 1,       /* max number of iovecs */
-                             0,                /* current offset */
-                             UIO_SYSSPACE,     /* type of address space */
-                             UIO_READ);       /* read or write flag */
 
 		//srcuio.uio_iov = srciov;
 
 		//srcuio.uio_iovcnt = iovcnt + 1;
 		//srcuio.uio_iov[iovcnt].iov_base = mac;
 		//srcuio.uio_iov[iovcnt].iov_len = maclen;
+        // Free me
+        srcuio = uio_create( iovcnt + 1,       /* max number of iovecs */
+                             0,                /* current offset */
+                             UIO_SYSSPACE,     /* type of address space */
+                             UIO_READ);        /* read or write flag */
+        ciphertext.cd_uio = srcuio;
+
         for (i = 0; i < iovcnt; i++)
-            uio_addiov(srcuio, (user_addr_t)srciov[i].iov_base, srciov[i].iov_len);
+            uio_addiov(srcuio, (user_addr_t)srciov[i].iov_base,
+                       srciov[i].iov_len);
         uio_addiov(srcuio, (user_addr_t)mac, maclen);
 
 		mech = zio_crypt_setup_mech_gen_iv(key->zk_crypt, type,
@@ -640,12 +637,13 @@ zio_decrypt_data(zcrypt_key_t *key, zbookmark_t *bookmark,
                              0,                /* current offset */
                              UIO_SYSSPACE,     /* type of address space */
                              UIO_READ);        /* read or write flag */
-
+        ciphertext.cd_uio = srcuio;
 
 		//srcuio.uio_iov = srciov;
 		//srcuio.uio_iovcnt = 2;
         for (i = 0; i < 2; i++)
-            uio_addiov(srcuio, (user_addr_t)srciov[i].iov_base, srciov[i].iov_len);
+            uio_addiov(srcuio, (user_addr_t)srciov[i].iov_base,
+                       srciov[i].iov_len);
 
 		ciphertext.cd_length = srcsize + maclen;
 
@@ -686,7 +684,7 @@ retry:
 		err = ECKSUM;
 #if _KERNEL
 #ifdef ZFS_CRYPTO_VERBOSE
-        printk("zio_crypt setting ECKSUM\n");
+        printf("zio_crypt setting ECKSUM\n");
 #endif
 #endif
 		break;
@@ -759,7 +757,7 @@ zvol_dump_crypt_common(spa_t *spa, uint64_t objset,
 	mech.cm_param_len = sizeof (CK_AES_CTR_PARAMS);
 
 #ifdef ZFS_CRYPTO_VERBOSE
-    printk("zio_crypt 2\n");
+    printf("zio_crypt 2\n");
 #endif
 
 	if (encrypt) {
