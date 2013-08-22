@@ -410,7 +410,7 @@ zio_decrypt(zio_t *zio, void *data, uint64_t size, void *arg)
 
 #if _KERNEL
 #ifdef ZFS_CRYPTO_VERBOSE
-	printk("zio_decrypt enter: %d\n", zio->io_error);
+	printf("zio_decrypt enter: %d\n", zio->io_error);
 #endif
 #endif
 
@@ -437,7 +437,7 @@ zio_decrypt(zio_t *zio, void *data, uint64_t size, void *arg)
     zcrypt_key_release(key, zio);
 #if _KERNEL
 #ifdef ZFS_CRYPTO_VERBOSE
-	printk("zio_decrypt exit\n");
+	printf("zio_decrypt exit\n");
 #endif
 #endif
 }
@@ -1075,7 +1075,7 @@ zio_read_bp_init(zio_t *zio)
             }
 #if _KERNEL
 #ifdef ZFS_CRYPTO_VERBOSE
-			printk("zio read_bp_init calling decrypt\n");
+			printf("zio read_bp_init calling decrypt\n");
 #endif
 #endif
             zcrypt_key_hold(key, zio);
@@ -1137,7 +1137,7 @@ zio_write_bp_init(zio_t *zio)
 
 #if _KERNEL
 #ifdef ZFS_CRYPTO_VERBOSE
-    printk("zio encrypt_data 1\n");
+    printf("zio encrypt_data 1\n");
 #endif
 #endif
 
@@ -1222,7 +1222,7 @@ zio_write_bp_init(zio_t *zio)
 
 #if _KERNEL
 #ifdef ZFS_CRYPTO_VERBOSE
-    printk("zio encrypt_data 2\n");
+    printf("zio encrypt_data 2\n");
 #endif
 #endif
         VERIFY3U(zio_encrypt_data(crypt, key, &zio->io_bookmark,
@@ -1231,7 +1231,7 @@ zio_write_bp_init(zio_t *zio)
                                   (char *)&mac, (char *)&iv), ==, 0);
 #if _KERNEL
 #ifdef ZFS_CRYPTO_VERBOSE
-        printk("zio encrypt_data 2 key_release\n");
+        printf("zio encrypt_data 2 key_release\n");
 #endif
 #endif
 
@@ -1239,7 +1239,7 @@ zio_write_bp_init(zio_t *zio)
 
 #if _KERNEL
 #ifdef ZFS_CRYPTO_VERBOSE
-        printk("zio encrypt_data 2 push_transform\n");
+        printf("zio encrypt_data 2 push_transform\n");
 #endif
 #endif
         zio_push_transform(zio, ebuf, psize, psize, NULL, NULL);

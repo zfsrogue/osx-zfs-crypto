@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <string.h>
-#include <endian.h>
+#include <sys/byteorder.h>
 
 #include "sha1.h"
 

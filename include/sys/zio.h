@@ -253,7 +253,7 @@ enum zio_wait_type {
  */
 #define	ECKSUM	EBADE
 #define	EFRAGS	EIDRM
-#define ENOKEY  EDOM
+#define ENOKEY  ETXTBSY
 
 typedef void zio_done_func_t(zio_t *zio);
 

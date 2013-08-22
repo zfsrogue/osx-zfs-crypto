@@ -1507,7 +1507,7 @@ zfs_feature_encryption(spa_t *spa, uint64_t dsobj,
                                  tx);
                 dmu_tx_commit(tx);
 
-                printk("feature@encryption active on '%s'\n", dsname);
+                printf("feature@encryption active on '%s'\n", dsname);
             }
         } // os
     }
@@ -1538,7 +1538,7 @@ zfs_ioc_pool_upgrade(zfs_cmd_t *zc)
 	spa_upgrade(spa, zc->zc_cookie);
 
     if (version == SPA_VERSION_30) {
-        printk("Converting pool version=encryption to feature@encryption\n");
+        printf("Converting pool version=encryption to feature@encryption\n");
         VERIFY(0 == dmu_objset_find_spa(spa,
                                         NULL,
                                         zfs_feature_encryption,
