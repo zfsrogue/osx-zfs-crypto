@@ -67,6 +67,7 @@ static uint64_t spa_config_generation = 1;
  * userland pools when doing testing.
  */
 char *spa_config_path = ZPOOL_CACHE;
+int zfs_autoimport_disable = 0;
 
 /*
  * Called when the module is first loaded, this routine loads the configuration
@@ -82,6 +83,9 @@ spa_config_load(void)
 	char *pathname;
 	struct _buf *file;
 	uint64_t fsize;
+
+	if (zfs_autoimport_disable)
+		return;
 
 	/*
 	 * Open the configuration file.
@@ -354,7 +358,7 @@ spa_config_generate(spa_t *spa, vdev_t *vd, uint64_t txg, int getstats)
 
 
 #ifdef	_KERNEL
-	//hostid = zone_get_hostid(NULL);
+	hostid = zone_get_hostid(NULL);
 #else	/* _KERNEL */
 	/*
 	 * We're emulating the system's hostid in userland, so we can't use
@@ -511,4 +515,8 @@ EXPORT_SYMBOL(spa_config_update);
 
 module_param(spa_config_path, charp, 0444);
 MODULE_PARM_DESC(spa_config_path, "SPA config file (/etc/zfs/zpool.cache)");
+
+module_param(zfs_autoimport_disable, int, 0644);
+MODULE_PARM_DESC(zfs_autoimport_disable, "Disable pool import at module load");
+
 #endif

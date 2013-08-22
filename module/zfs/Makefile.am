@@ -76,6 +76,7 @@ zfs_SOURCES = \
 	fm.c \
 	gzip.c \
 	lzjb.c \
+	lz4.c \
 	metaslab.c \
 	refcount.c \
 	rrwlock.c \

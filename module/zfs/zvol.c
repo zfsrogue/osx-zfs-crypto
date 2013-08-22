@@ -174,7 +174,7 @@ zvol_size_changed(zvol_state_t *zv, uint64_t volsize)
 	VERIFY(ddi_prop_update_int64(dev, zfs_dip,
 	    "Size", volsize) == DDI_SUCCESS);
 	VERIFY(ddi_prop_update_int64(dev, zfs_dip,
-	    "Nblocks", lbtodb(volsize)) == DDI_SUCCESS);
+	    "Nblocks", volsize / zv_zv_volblocksize) == DDI_SUCCESS);
 
     //zvolSetVolsize(zv);
 
@@ -593,6 +593,18 @@ zvol_create_minor(const char *name)
 	return (0);
 }
 
+
+/*
+ * Given a path, return TRUE if path is a ZVOL.
+ */
+boolean_t
+zvol_is_zvol(const char *device)
+{
+    /* stat path, check for minor */
+    return (B_FALSE);
+}
+
+
 /*
  * Remove minor node for the specified volume.
  */
@@ -850,6 +862,35 @@ zvol_update_live_volsize(zvol_state_t *zv, uint64_t volsize)
 	}
 	return (error);
 }
+
+static int
+snapdev_snapshot_changed_cb(const char *dsname, void *arg) {
+    uint64_t snapdev = *(uint64_t *) arg;
+
+    if (strchr(dsname, '@') == NULL)
+        return 0;
+
+    switch (snapdev) {
+    case ZFS_SNAPDEV_VISIBLE:
+        (void) zvol_create_minor(dsname);
+        break;
+    case ZFS_SNAPDEV_HIDDEN:
+        (void) zvol_remove_minor(dsname);
+        break;
+    }
+    return 0;
+}
+
+
+
+int
+zvol_set_snapdev(const char *dsname, uint64_t snapdev) {
+    (void) dmu_objset_find((char *) dsname, snapdev_snapshot_changed_cb,
+                           &snapdev, DS_FIND_SNAPSHOTS | DS_FIND_CHILDREN);
+    /* caller should continue to modify snapdev property */
+    return (-1);
+}
+
 
 int
 zvol_set_volsize(const char *name, uint64_t volsize)
@@ -2796,7 +2837,6 @@ int zvol_unlink(char *root, char *target)
  * Note, we do not create symlinks for the partitioned slices.
  *
  */
-#define ZVOL_ROOT "/var/run"
 
 void zvol_add_symlink(zvol_state_t *zv, const char *bsd_disk, const char *bsd_rdisk)
 {

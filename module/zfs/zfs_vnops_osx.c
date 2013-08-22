@@ -58,6 +58,9 @@
 #include <sys/xattr.h>
 #include <sys/utfconv.h>
 #include <sys/ubc.h>
+#include <sys/callb.h>
+#include <sys/unistd.h>
+
 
 #define	DECLARE_CRED(ap) \
 	cred_t *cr = (cred_t *)vfs_context_ucred((ap)->a_context)
@@ -68,6 +71,9 @@
 	DECLARE_CONTEXT(ap)
 
 //#define dprintf printf
+
+// Move this somewhere else, maybe autoconf?
+#define HAVE_NAMED_STREAMS 1
 
 /*
  * zfs vfs operations.
@@ -134,8 +140,13 @@ zfs_vnop_open(
         } */ *ap)
 {
 	DECLARE_CRED_AND_CONTEXT(ap);
+    int err = 0;
 
-	return (zfs_open(&ap->a_vp, ap->a_mode, cr, ct));
+	err = zfs_open(&ap->a_vp, ap->a_mode, cr, ct);
+
+    if (err) printf("zfs_open() failed %d\n", err);
+
+    return err;
 }
 
 static int
@@ -465,7 +476,9 @@ zfs_vnop_fsync(
 	} */ *ap)
 {
 	znode_t *zp = VTOZ(ap->a_vp);
+    zfsvfs_t *zfsvfs;
 	DECLARE_CRED_AND_CONTEXT(ap);
+    int err;
 
 	/*
 	 * Check if this znode has already been synced, freed, and recycled
@@ -476,7 +489,23 @@ zfs_vnop_fsync(
 	if (zp == NULL)
 		return (0);
 
-	return (zfs_fsync(ap->a_vp, /*flag*/0, cr, ct));
+    zfsvfs = zp->z_zfsvfs;
+
+    /*
+     * Because vnode_create() can end up calling fsync, which means we would
+     * sit around waiting for dmu_tx, while higher up in this thread may
+     * have called vnode_create(), while waiting for dmu_tx. We have wrapped
+     * the vnode_create() call with a lock, so we can ignore fsync while
+     * inside vnode_create().
+     */
+
+    // Defer syncs if we are coming through vnode_create()
+    if (mutex_owner(&zfsvfs->z_vnode_create_lock)) {
+        return 0;
+    }
+
+	err = zfs_fsync(ap->a_vp, /*flag*/0, cr, ct);
+    return err;
 }
 
 static int
@@ -518,7 +547,7 @@ zfs_vnop_setattr(
     // Translate OSX requested mask to ZFS
     if (VATTR_IS_ACTIVE(vap, va_data_size))
         mask |= AT_SIZE;
-	if (VATTR_IS_ACTIVE(vap, va_mode) || VATTR_IS_ACTIVE(vap, va_acl))
+	if (VATTR_IS_ACTIVE(vap, va_mode))
         mask |= AT_MODE;
     if (VATTR_IS_ACTIVE(vap, va_uid))
         mask |= AT_UID;
@@ -534,24 +563,43 @@ zfs_vnop_setattr(
     if (VATTR_IS_ACTIVE(vap, va_backup_time))
         mask |= AT_BTIME; // really?
     */
+    /*
+     * Both 'flags' and 'acl' can come to setattr, but without 'mode' set
+     * however, ZFS assumes 'mode' is also set.
+     * We need to look up 'mode' in this case.
+     */
+
+    if ((VATTR_IS_ACTIVE(vap, va_flags) ||
+         VATTR_IS_ACTIVE(vap, va_acl)) &&
+        !VATTR_IS_ACTIVE(vap, va_mode)) {
+
+        znode_t *zp = VTOZ(ap->a_vp);
+        uint64_t mode;
+
+        mask |= AT_MODE;
+
+        dprintf("fetching MODE for FLAGS or ACL\n");
+        ZFS_ENTER(zp->z_zfsvfs);
+        ZFS_VERIFY_ZP(zp);
+        (void) sa_lookup(zp->z_sa_hdl, SA_ZPL_MODE(zp->z_zfsvfs),
+                         &mode, sizeof (mode));
+        vap->va_mode = mode;
+        ZFS_EXIT(zp->z_zfsvfs);
+    }
+
     if (VATTR_IS_ACTIVE(vap, va_flags)) {
         znode_t *zp = VTOZ(ap->a_vp);
-        mask |= AT_MODE; // really?
-        // OS X can set flags without mode, so we need to look up mode in that
-        // case.
-        if (!VATTR_IS_ACTIVE(vap, va_mode)) {
-            uint64_t mode;
-            dprintf("fetching MODE for FLAGS\n");
-            (void) sa_lookup(zp->z_sa_hdl, SA_ZPL_MODE(zp->z_zfsvfs),
-                             &mode, sizeof (mode));
-            vap->va_mode = mode;
-        }
+
         // Map OS X file flags to zfs file flags
         zfs_setbsdflags(zp, vap->va_flags);
         dprintf("OSX flags %08lx changed to ZFS %04lx\n", vap->va_flags,
-               zp->z_pflags);
+                zp->z_pflags);
         vap->va_flags = zp->z_pflags;
 
+    }
+
+	if (VATTR_IS_ACTIVE(vap, va_acl)) {
+        mask |= AT_ACL;
     }
 
     vap->va_mask = mask;
@@ -1095,6 +1143,87 @@ zfs_vnop_inactive(
 	return (0);
 }
 
+#ifdef _KERNEL
+uint64_t vnop_num_reclaims=0;
+
+/*
+ * Thread started to deal with any nodes in z_reclaim_nodes
+ */
+void vnop_reclaim_thread(void *arg)
+{
+    znode_t *zp;
+	callb_cpr_t		cpr;
+    zfsvfs_t *zfsvfs = (zfsvfs_t *)arg;
+
+    //#define VERBOSE_RECLAIM
+#ifdef VERBOSE_RECLAIM
+    int count = 0;
+    printf("ZFS: reclaim %p thread is alive!\n", zfsvfs);
+#endif
+
+	CALLB_CPR_INIT(&cpr, &zfsvfs->z_reclaim_thr_lock, callb_generic_cpr, FTAG);
+
+	mutex_enter(&zfsvfs->z_reclaim_thr_lock);
+
+    while (1) {
+
+        while (1) {
+
+            mutex_enter(&zfsvfs->z_vnode_create_lock);
+
+            zp = list_head(&zfsvfs->z_reclaim_znodes);
+            if (zp)
+                list_remove(&zfsvfs->z_reclaim_znodes, zp);
+            mutex_exit(&zfsvfs->z_vnode_create_lock);
+
+            /* Only exit thread once list is empty */
+            if (!zp) break;
+
+#ifdef VERBOSE_RECLAIM
+            count++;
+#endif
+#ifdef _KERNEL
+            atomic_dec_64(&vnop_num_reclaims);
+#endif
+            rw_enter(&zfsvfs->z_teardown_inactive_lock, RW_READER);
+            if (zp->z_sa_hdl == NULL)
+                zfs_znode_free(zp);
+            else
+                zfs_zinactive(zp);
+            rw_exit(&zfsvfs->z_teardown_inactive_lock);
+
+        } // until empty
+
+#ifdef VERBOSE_RECLAIM
+        if (count)
+            printf("reclaim_thr: %p nodes released: %d\n", zfsvfs, count);
+        count = 0;
+#endif
+
+        /* Allow us to quit, since list is empty */
+        if (zfsvfs->z_reclaim_thread_exit == TRUE) break;
+
+		/* block until needed, or one second, whichever is shorter */
+		CALLB_CPR_SAFE_BEGIN(&cpr);
+		(void) cv_timedwait_interruptible(&zfsvfs->z_reclaim_thr_cv,
+                                          &zfsvfs->z_reclaim_thr_lock,
+                                          (ddi_get_lbolt() + (hz>>1)));
+		CALLB_CPR_SAFE_END(&cpr, &zfsvfs->z_reclaim_thr_lock);
+
+    } // forever
+
+#ifdef VERBOSE_RECLAIM
+    printf("ZFS: reclaim thread %p is quitting!\n", zfsvfs);
+#endif
+
+    zfsvfs->z_reclaim_thread_exit = FALSE;
+	cv_broadcast(&zfsvfs->z_reclaim_thr_cv);
+	CALLB_CPR_EXIT(&cpr);		/* drops zfsvfs->z_reclaim_thr_lock */
+
+    thread_exit();
+}
+#endif
+
 static int
 zfs_vnop_reclaim(
 	struct vnop_reclaim_args /* {
@@ -1105,7 +1234,7 @@ zfs_vnop_reclaim(
 	struct vnode	*vp = ap->a_vp;
 	znode_t	*zp = VTOZ(vp);
 	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
-
+    static int has_warned = 0;
 	ASSERT(zp != NULL);
 
     dprintf("+vnop_reclaim %p\n", vp);
@@ -1115,27 +1244,55 @@ zfs_vnop_reclaim(
 	vnode_destroy_vobject(vp);
 #endif
 
-	/*
-	 * z_teardown_inactive_lock protects from a race with
-	 * zfs_znode_dmu_fini in zfsvfs_teardown during
-	 * force unmount.
-	 */
-	rw_enter(&zfsvfs->z_teardown_inactive_lock, RW_READER);
-    dprintf("reclaim %p\n", zp->z_sa_hdl);
-	if (zp->z_sa_hdl == NULL)
-		zfs_znode_free(zp);
-	else
-		zfs_zinactive(zp);
-	rw_exit(&zfsvfs->z_teardown_inactive_lock);
-
-#ifndef __APPLE__
-	vp->v_data = NULL;
-#else
     vnode_clearfsnode(vp); /* vp->v_data = NULL */
-	vnode_removefsref(vp); /* ADDREF from vnode_create */
+    vnode_removefsref(vp); /* ADDREF from vnode_create */
+
+    /*
+     * Calls into vnode_create() can trigger reclaim and since we are
+     * likely to hold locks while inside vnode_create(), we need to defer
+     * reclaims until later.
+     */
+
+    // We always grab vnode_create_lock before znodes_lock
+    mutex_enter(&zfsvfs->z_znodes_lock);
+    zp->z_vnode = NULL;
+    list_remove(&zfsvfs->z_all_znodes, zp); //XXX
+    mutex_exit(&zfsvfs->z_znodes_lock);
+
+#ifdef _KERNEL
+    atomic_inc_64(&vnop_num_reclaims);
 #endif
-    dprintf("-reclaim\n");
-	return (0);
+    // We might already holding vnode_create_lock
+    if (mutex_owner(&zfsvfs->z_vnode_create_lock)) {
+        list_insert_tail(&zfsvfs->z_reclaim_znodes, zp);
+    } else {
+        mutex_enter(&zfsvfs->z_vnode_create_lock);
+        list_insert_tail(&zfsvfs->z_reclaim_znodes, zp);
+        mutex_exit(&zfsvfs->z_vnode_create_lock);
+    }
+
+#if 0
+    if (!has_warned && vnop_num_reclaims > 20000) {
+        has_warned = 1;
+        printf("ZFS: Reclaim thread appears dead (%llu) -- good luck\n",
+               vnop_num_reclaims);
+    }
+#endif
+
+    /*
+     * Which is better, the reclaim thread triggering frequently, with mostly
+     * 1 node to reclaim each time, many times a second.
+     * Or, only once per second, and about ~1600 nodes?
+     */
+
+    /*
+     * As it turns out, possibly from the high frequency that reclaims are
+     * called, calling either cv_signal() or cv_broadcast() here will
+     * eventually halt the reclaim thread (cv_wait never returns).
+     * So, we let the reclaim thread wake up when it wants to.
+     */
+    //cv_broadcast(&zfsvfs->z_reclaim_thr_cv);
+    return 0;
 }
 
 static int
@@ -1184,16 +1341,61 @@ zfs_vnop_whiteout(
 
 static int
 zfs_vnop_pathconf(
-	struct vnop_pathconf_args /* {
-		struct vnode *a_vp;
-		int a_name;
-		register_t *a_retval;
-		vfs_context_t a_context;
-	} */ *ap)
+        struct vnop_pathconf_args /* {
+                struct vnode *a_vp;
+                int a_name;
+                register_t *a_retval;
+                vfs_context_t a_context;
+        } */ *ap)
 {
-    dprintf("vnop_patchconf: 0\n");
+        dprintf("+vnop_pathconf a_name %d\n", ap->a_name);
+        int32_t  *valp = ap->a_retval;
+        int error = 0;
 
-	return (0);
+        switch (ap->a_name) {
+        case _PC_LINK_MAX:
+                *valp = INT_MAX;
+                break;
+
+        case _PC_PIPE_BUF:
+                *valp = PIPE_BUF;
+                break;
+
+        case _PC_CHOWN_RESTRICTED:
+                *valp = 200112;  /* POSIX */
+                break;
+
+        case _PC_NO_TRUNC:
+                *valp = 200112;  /* POSIX */
+                break;
+
+        case _PC_NAME_MAX:
+        case _PC_NAME_CHARS_MAX:
+                *valp = ZAP_MAXNAMELEN - 1;  /* 255 */
+                break;
+
+        case _PC_PATH_MAX:
+        case _PC_SYMLINK_MAX:
+                *valp = PATH_MAX;  /* 1024 */
+                break;
+
+        case _PC_CASE_SENSITIVE:
+                *valp = 1;
+                break;
+
+        case _PC_CASE_PRESERVING:
+                *valp = 1;
+                break;
+
+        case _PC_FILESIZEBITS:
+                *valp = 64;
+                break;
+
+        default:
+                error = EINVAL;
+        }
+        dprintf("-vnop_patchconf vp %p : %d\n", ap->a_vp, error);
+        return error;
 }
 
 static int
@@ -1387,8 +1589,8 @@ zfs_vnop_removexattr(
 		goto out;
 	}
 
-    VERIFY(sa_lookup(zp->z_sa_hdl, SA_ZPL_XATTR(zfsvfs),
-                     &xattr, sizeof(xattr)) == 0);
+    sa_lookup(zp->z_sa_hdl, SA_ZPL_XATTR(zfsvfs),
+                     &xattr, sizeof(xattr));
 	if (xattr == 0) {
 		error = ENOATTR;
 		goto out;
@@ -1555,8 +1757,8 @@ zfs_vnop_getnamedstream(
 	*svpp = NULLVP;
 	ZFS_ENTER(zfsvfs);
 
-    VERIFY(sa_lookup(zp->z_sa_hdl, SA_ZPL_XATTR(zfsvfs),
-                     &xattr, sizeof(xattr)) == 0);
+    sa_lookup(zp->z_sa_hdl, SA_ZPL_XATTR(zfsvfs),
+                     &xattr, sizeof(xattr));
 	/*
 	 * Mac OS X only supports the "com.apple.ResourceFork" stream.
 	 */
@@ -1591,7 +1793,7 @@ out:
 }
 
 static int
-zfs_vnop_makenamedstream_args(
+zfs_vnop_makenamedstream(
 	struct vnop_makenamedstream_args /* {
 		struct vnode *a_vp;
 		struct vnode **a_svpp;
@@ -2308,7 +2510,13 @@ int zfs_znode_getvnode(znode_t *zp, zfsvfs_t *zfsvfs, struct vnode **vpp)
 		break;
 	}
 
+    /*
+     * vnode_create() has a habit of calling both vnop_reclaim() and
+     * vnop_fsync(), which can create havok as we are already holding locks.
+     */
+    mutex_enter(&zfsvfs->z_vnode_create_lock);
     while (vnode_create(VNCREATE_FLAVOR, VCREATESIZE, &vfsp, vpp) != 0);
+    mutex_exit(&zfsvfs->z_vnode_create_lock);
 
     dprintf("Assigned zp %p with vp %p\n", zp, *vpp);
 

@@ -25,9 +25,7 @@
 /*
  * Copyright 2011 Nexenta Systems, Inc. All rights reserved.
  * Copyright (c) 2012, Joyent, Inc. All rights reserved.
- */
-/*
- *
+ * Copyright (c) 2012 by Delphix. All rights reserved.
  * Copyright 2013 Jorgen Lundman. All rights reserved.
  *
  */
@@ -64,7 +62,6 @@
 #define MAX_UPL_TRANSFER 256
 #endif
 
-
-
+#define ZVOL_ROOT "/var/run"
 
 #endif	/* _SYS_ZFS_CONTEXT_H */

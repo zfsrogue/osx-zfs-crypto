@@ -244,15 +244,15 @@ zfs_close(vnode_t *vp, int flag, int count, offset_t offset, cred_t *cr,
 	return (0);
 }
 
-#ifndef __APPLE__
+#if defined(SEEK_HOLE) && defined(SEEK_DATA)
 /*
- * Lseek support for finding holes (cmd == _FIO_SEEK_HOLE) and
- * data (cmd == _FIO_SEEK_DATA). "off" is an in/out parameter.
+ * Lseek support for finding holes (cmd == SEEK_HOLE) and
+ * data (cmd == SEEK_DATA). "off" is an in/out parameter.
  */
 static int
-zfs_holey(vnode_t *vp, u_long cmd, offset_t *off)
+zfs_holey_common(struct inode *ip, int cmd, loff_t *off)
 {
-	znode_t	*zp = VTOZ(vp);
+	znode_t	*zp = ITOZ(ip);
 	uint64_t noff = (uint64_t)*off; /* new offset */
 	uint64_t file_sz;
 	int error;
@@ -260,15 +260,15 @@ zfs_holey(vnode_t *vp, u_long cmd, offset_t *off)
 
 	file_sz = zp->z_size;
 	if (noff >= file_sz)  {
-		return ((ENXIO));
+		return (ENXIO);
 	}
 
-	if (cmd == _FIO_SEEK_HOLE)
+	if (cmd == SEEK_HOLE)
 		hole = B_TRUE;
 	else
 		hole = B_FALSE;
 
-	error = dmu_offset_next(zp->z_zfsvfs->z_os, zp->z_id, hole, &noff);
+	error = dmu_offset_next(ZTOZSB(zp)->z_os, zp->z_id, hole, &noff);
 
 	/* end of file? */
 	if ((error == ESRCH) || (noff > file_sz)) {
@@ -279,7 +279,7 @@ zfs_holey(vnode_t *vp, u_long cmd, offset_t *off)
 			*off = file_sz;
 			return (0);
 		}
-		return ((ENXIO));
+		return (ENXIO);
 	}
 
 	if (noff < *off)
@@ -287,79 +287,26 @@ zfs_holey(vnode_t *vp, u_long cmd, offset_t *off)
 	*off = noff;
 	return (error);
 }
-#endif
 
-
-#ifndef __APPLE__
-/* ARGSUSED */
 int
-zfs_ioctl(vnode_t *vp, u_long com, intptr_t data, int flag, cred_t *cred,
-    int *rvalp, caller_context_t *ct)
+zfs_holey(struct inode *ip, int cmd, loff_t *off)
 {
-	offset_t off;
+	znode_t	*zp = ITOZ(ip);
+	zfs_sb_t *zsb = ITOZSB(ip);
 	int error;
-	zfsvfs_t *zfsvfs;
-	znode_t *zp;
 
-	switch (com) {
-	case _FIOFFS:
-		return (0);
+	ZFS_ENTER(zsb);
+	ZFS_VERIFY_ZP(zp);
 
-		/*
-		 * The following two ioctls are used by bfu.  Faking out,
-		 * necessary to avoid bfu errors.
-		 */
-	case _FIOGDIO:
-	case _FIOSDIO:
-		return (0);
+	error = zfs_holey_common(ip, cmd, off);
 
-	case _FIO_SEEK_DATA:
-	case _FIO_SEEK_HOLE:
-#ifdef sun
-		if (ddi_copyin((void *)data, &off, sizeof (off), flag))
-			return ((EFAULT));
-#else
-		off = *(offset_t *)data;
-#endif
-		zp = VTOZ(vp);
-		zfsvfs = zp->z_zfsvfs;
-		ZFS_ENTER(zfsvfs);
-		ZFS_VERIFY_ZP(zp);
-
-		/* offset parameter is in/out */
-		error = zfs_holey(vp, com, &off);
-		ZFS_EXIT(zfsvfs);
-		if (error)
-			return (error);
-#ifdef sun
-		if (ddi_copyout(&off, (void *)data, sizeof (off), flag))
-			return ((EFAULT));
-#else
-		*(offset_t *)data = off;
-#endif
-		return (0);
-	}
-	return ((ENOTTY));
-}
-#endif
-
-#ifndef __APPLE__
-static caddr_t
-zfs_map_page(page_t *pp, struct sf_buf **sfp)
-{
-
-	*sfp = sf_buf_alloc(pp, 0);
-	return ((caddr_t)sf_buf_kva(*sfp));
+	ZFS_EXIT(zsb);
+	return (error);
 }
 
-static void
-zfs_unmap_page(struct sf_buf *sf)
-{
+#endif /* SEEK_HOLE && SEEK_DATA */
 
-	sf_buf_free(sf);
-}
-#endif
-
+#if defined(_KERNEL)
 /*
  * When a file is memory mapped, we must keep the IO data synchronized
  * between the DMU cache and the memory mapped pages.  What this means:
@@ -457,7 +404,7 @@ update_pages(vnode_t *vp, int64_t nbytes, struct uio *uio,
     }
 
 }
-
+#endif
 
 /*
  * Read with UIO_NOCOPY flag means that sendfile(2) requests
@@ -2129,6 +2076,8 @@ top:
 		ASSERT0(vp->v_count);
 		VI_UNLOCK(vp);
 #else
+        /* None of this code is run on Apple, see delete_now panic above */
+
         /* Release the hold zfs_zget put on the vnode */
 		vnode_put(vp);
 
@@ -3134,6 +3083,9 @@ zfs_getattr(vnode_t *vp, vattr_t *vap, int flags, cred_t *cr,
 	return (0);
 }
 
+
+
+
 /*
  * Set the file attributes to the values contained in the
  * vattr structure.
@@ -3248,6 +3200,12 @@ zfs_setattr(vnode_t *vp, vattr_t *vap, int flags, cred_t *cr,
 	 * handle times greater than 2039.  This check should be removed
 	 * once large timestamps are fully supported.
 	 */
+
+    /*
+     * This test now hinders NFS from working as expected. Most like the
+     * 32bit timestamp issues have already been fixed.
+     */
+#if 0
 	if (mask & (AT_ATIME | AT_MTIME)) {
 		if (((mask & AT_ATIME) && TIMESPEC_OVERFLOW(&vap->va_atime)) ||
 		    ((mask & AT_MTIME) && TIMESPEC_OVERFLOW(&vap->va_mtime))) {
@@ -3255,6 +3213,7 @@ zfs_setattr(vnode_t *vp, vattr_t *vap, int flags, cred_t *cr,
 			return ((EOVERFLOW));
 		}
 	}
+#endif
 
 top:
 	attrzp = NULL;
@@ -3527,10 +3486,58 @@ top:
 	}
 	tx = dmu_tx_create(zfsvfs->z_os);
 
+    /*
+     * ACLs are currently not working, there appears to be two implementations
+     * here, one is old MacZFS "zfs_setacl" and the other is ZFS (FBSD?)
+     * with zfs_external_acl().
+     */
+
+	if (mask & AT_ACL) {
+
+        if ((vap->va_acl != (kauth_acl_t) KAUTH_FILESEC_NONE) &&
+            (vap->va_acl->acl_entrycount != KAUTH_FILESEC_NOACL)) {
+
+            vsecattr_t      vsecattr;
+            int		aclbsize;	/* size of acl list in bytes */
+            ace_t	*aaclp;
+            struct kauth_acl *kauth;
+
+            dprintf("Calling setacl\n");
+
+            vsecattr.vsa_mask = VSA_ACE;
+
+            kauth = vap->va_acl;
+
+            aclbsize = kauth->acl_entrycount * sizeof(ace_t);
+            vsecattr.vsa_aclentp = kmem_alloc(aclbsize, KM_SLEEP);
+            aaclp = vsecattr.vsa_aclentp;
+            vsecattr.vsa_aclentsz = aclbsize;
+
+            dprintf("aces_from_acl %d entries\n", kauth->acl_entrycount);
+            aces_from_acl(vsecattr.vsa_aclentp, &vsecattr.vsa_aclcnt, kauth);
+
+            err = zfs_setacl(zp, &vsecattr, B_TRUE, cr);
+            kmem_free(aaclp, aclbsize);
+
+        } else {
+            struct kauth_acl blank_acl;
+
+            bzero(&blank_acl, sizeof blank_acl);
+            if ((err = zfs_setacl(zp, &blank_acl, B_TRUE, cr)))
+                dprintf("setattr: setacl failed: %d\n", err);
+        }
+        }
+
+
 	if (mask & AT_MODE) {
 		uint64_t pmode = zp->z_mode;
 		uint64_t acl_obj;
-		new_mode = (pmode & S_IFMT) | (vap->va_mode & ~S_IFMT);
+
+        if(!(mask & AT_ACL)) {
+            new_mode = (pmode & S_IFMT) | (vap->va_mode & ~S_IFMT);
+        } else {
+            new_mode = pmode;
+        }
 
 		if (zp->z_zfsvfs->z_acl_mode == ZFS_ACL_RESTRICTED &&
 		    !(zp->z_pflags & ZFS_ACL_TRIVIAL)) {
@@ -3668,15 +3675,21 @@ top:
 		SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_MODE(zfsvfs), NULL,
 		    &new_mode, sizeof (new_mode));
 		zp->z_mode = new_mode;
-		ASSERT3U((uintptr_t)aclp, !=, 0);
-		err = zfs_aclset_common(zp, aclp, cr, tx);
-		ASSERT(err==0);
-		if (zp->z_acl_cached)
-			zfs_acl_free(zp->z_acl_cached);
-		zp->z_acl_cached = aclp;
-		aclp = NULL;
+		/*
+         	 * Mode change needs to trigger corresponding update to trivial ACLs.
+         	 * ACL change already does this, and another call to zfs_aclset_common
+		 * would overwrite our explicit ACL changes.
+         	 */
+		if(!(mask & AT_ACL)) {
+                       ASSERT3U((uintptr_t)aclp, !=, 0);
+                       err = zfs_aclset_common(zp, aclp, cr, tx);
+                       ASSERT(err==0);
+                       if (zp->z_acl_cached)
+                       zfs_acl_free(zp->z_acl_cached);
+                       zp->z_acl_cached = aclp;
+                       aclp = NULL;
+		}
 	}
-
 
 	if (mask & AT_ATIME) {
 		ZFS_TIME_ENCODE(&vap->va_atime, zp->z_atime);

@@ -77,6 +77,8 @@
 #include <zfs_comutil.h>
 
 #ifndef __APPLE__
+#include <sys/sa.h>
+#include <sys/sa_impl.h>
 #include <sys/varargs.h>
 #include <sys/policy.h>
 #include <sys/atomic.h>
@@ -89,8 +91,12 @@
 #include <sys/sunddi.h>
 #include <sys/dnlc.h>
 #endif /* !__APPLE__ */
+#include <sys/dmu_objset.h>
+#include <sys/spa_boot.h>
+#include <sys/zpl.h>
+#include "zfs_comutil.h"
 
-
+//#define dprintf printf
 
 #ifdef __APPLE__
 
@@ -125,7 +131,9 @@ const vol_capabilities_attr_t zfs_capabilities = {
 		VOL_CAP_INT_ADVLOCK |
 		VOL_CAP_INT_FLOCK |
 		VOL_CAP_INT_EXTENDED_SECURITY |
+#if NAMEDSTREAMS
 		VOL_CAP_INT_NAMEDSTREAMS |
+#endif
 		VOL_CAP_INT_EXTENDED_ATTR ,
 
 		0 , 0
@@ -162,7 +170,9 @@ const vol_capabilities_attr_t zfs_capabilities = {
 		VOL_CAP_INT_EXTENDED_SECURITY |
 		VOL_CAP_INT_USERACCESS |
 		VOL_CAP_INT_MANLOCK |
+#if NAMEDSTREAMS
 		VOL_CAP_INT_NAMEDSTREAMS |
+#endif
 		VOL_CAP_INT_EXTENDED_ATTR ,
 
 		0, 0
@@ -695,6 +705,8 @@ static int
 zfs_space_delta_cb(dmu_object_type_t bonustype, void *data,
     uint64_t *userp, uint64_t *groupp)
 {
+	int error = 0;
+
 	/*
 	 * Is it a valid type of object to track?
 	 */
@@ -1105,13 +1117,22 @@ zfsvfs_create(const char *osname, zfsvfs_t **zfvp)
 
 	mutex_init(&zfsvfs->z_znodes_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&zfsvfs->z_lock, NULL, MUTEX_DEFAULT, NULL);
+	mutex_init(&zfsvfs->z_vnode_create_lock, NULL, MUTEX_DEFAULT, NULL);
+	mutex_init(&zfsvfs->z_reclaim_thr_lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&zfsvfs->z_reclaim_thr_cv, NULL, CV_DEFAULT, NULL);
 	list_create(&zfsvfs->z_all_znodes, sizeof (znode_t),
+	    offsetof(znode_t, z_link_node));
+	list_create(&zfsvfs->z_reclaim_znodes, sizeof (znode_t),
 	    offsetof(znode_t, z_link_node));
 	rrw_init(&zfsvfs->z_teardown_lock/*, B_FALSE*/);
 	rw_init(&zfsvfs->z_teardown_inactive_lock, NULL, RW_DEFAULT, NULL);
 	rw_init(&zfsvfs->z_fuid_lock, NULL, RW_DEFAULT, NULL);
 	for (i = 0; i != ZFS_OBJ_MTX_SZ; i++)
 		mutex_init(&zfsvfs->z_hold_mtx[i], NULL, MUTEX_DEFAULT, NULL);
+
+    zfsvfs->z_reclaim_thread_exit = FALSE;
+	(void) thread_create(NULL, 0, vnop_reclaim_thread, zfsvfs, 0, &p0,
+	    TS_RUN, minclsyspri);
 
 	*zfvp = zfsvfs;
 	return (0);
@@ -1152,8 +1173,10 @@ zfsvfs_setup(zfsvfs_t *zfsvfs, boolean_t mounting)
 		 * During replay we remove the read only flag to
 		 * allow replays to succeed.
 		 */
+#if 0
 		if (!vfs_isrdonly(zfsvfs->z_vfs))
 			zfs_unlinked_drain(zfsvfs);
+#endif
 
 		/*
 		 * Parse and replay the intent log.
@@ -1211,14 +1234,28 @@ zfsvfs_free(zfsvfs_t *zfsvfs)
 	 * not unmounted. We consider the filesystem valid before the barrier
 	 * and invalid after the barrier.
 	 */
-	rw_enter(&zfsvfs_lock, RW_READER);
-	rw_exit(&zfsvfs_lock);
+	//rw_enter(&zfsvfs_lock, RW_READER);
+	//rw_exit(&zfsvfs_lock);
 
 	zfs_fuid_destroy(zfsvfs);
 
+    dprintf("stopping reclaim thread\n");
+	mutex_enter(&zfsvfs->z_reclaim_thr_lock);
+    zfsvfs->z_reclaim_thread_exit = TRUE;
+	cv_signal(&zfsvfs->z_reclaim_thr_cv);
+	while (zfsvfs->z_reclaim_thread_exit == TRUE)
+		cv_wait(&zfsvfs->z_reclaim_thr_cv, &zfsvfs->z_reclaim_thr_lock);
+	mutex_exit(&zfsvfs->z_reclaim_thr_lock);
+
+	mutex_destroy(&zfsvfs->z_reclaim_thr_lock);
+	cv_destroy(&zfsvfs->z_reclaim_thr_cv);
+    dprintf("Stopped, then releasing node.\n");
+
 	mutex_destroy(&zfsvfs->z_znodes_lock);
 	mutex_destroy(&zfsvfs->z_lock);
+	mutex_destroy(&zfsvfs->z_vnode_create_lock);
 	list_destroy(&zfsvfs->z_all_znodes);
+	list_destroy(&zfsvfs->z_reclaim_znodes);
 	rrw_destroy(&zfsvfs->z_teardown_lock);
 	rw_destroy(&zfsvfs->z_teardown_inactive_lock);
 	rw_destroy(&zfsvfs->z_fuid_lock);
@@ -1927,6 +1964,7 @@ zfs_vfs_mount(struct mount *vfsp, vnode_t *mvp /*devvp*/,
 		if (strpbrk(osname, "/"))
 			vfs_setflags(vfsp, (u_int64_t)((unsigned int)MNT_DONTBROWSE));
 
+        //vfs_setflags(vfsp, (u_int64_t)((unsigned int)MNT_DOVOLFS));
 		/* Indicate to VFS that we support ACLs. */
 		vfs_setextendedsecurity(vfsp);
 
@@ -2143,8 +2181,19 @@ zfs_vfs_getattr(struct mount *mp, struct vfs_attr *fsap, __unused vfs_context_t 
 
 	}
 	VFSATTR_RETURN(fsap, f_fssubtype, 0);
-	VFSATTR_RETURN(fsap, f_signature, 0x5a21);  /* 'Z!' */
+
+    /* According to joshade over at
+     * https://github.com/joshado/liberate-applefileserver/blob/master/liberate.m
+     * the following values need to be returned for it to be considered
+     * by Apple's AFS.
+     */
+
+	//VFSATTR_RETURN(fsap, f_signature, 0x5a21);  /* 'Z!' */
+	//VFSATTR_RETURN(fsap, f_carbon_fsid, 0);
+	VFSATTR_RETURN(fsap, f_signature, 18475);  /*  */
 	VFSATTR_RETURN(fsap, f_carbon_fsid, 0);
+
+
 #else /* OpenSolaris */
 	statp->f_ffree = MIN(availobjs, statp->f_bfree);
 	statp->f_files = statp->f_ffree + usedobjs;
@@ -2233,6 +2282,14 @@ zfsvfs_teardown(zfsvfs_t *zfsvfs, boolean_t unmounting)
 	}
 
 	/*
+	 * If someone has not already unmounted this file system,
+	 * drain the iput_taskq to ensure all active references to the
+	 * zfs_sb_t have been handled only then can it be safely destroyed.
+	 */
+	if (zfsvfs->z_os)
+		taskq_wait(dsl_pool_iput_taskq(dmu_objset_pool(zfsvfs->z_os)));
+
+	/*
 	 * Close the zil. NB: Can't close the zil while zfs_inactive
 	 * threads are blocked as zil_close can call zfs_inactive.
 	 */
@@ -2255,9 +2312,9 @@ zfsvfs_teardown(zfsvfs_t *zfsvfs, boolean_t unmounting)
 	}
 
 	/*
-	 * At this point there are no vops active, and any new vops will
-	 * fail with EIO since we have z_teardown_lock for writer (only
-	 * relavent for forced unmount).
+	 * At this point there are no VFS ops active, and any new VFS ops
+	 * will fail with EIO since we have z_teardown_lock for writer (only
+	 * relevant for forced unmount).
 	 *
 	 * Release all holds on dbufs.
 	 */
@@ -2271,9 +2328,9 @@ zfsvfs_teardown(zfsvfs_t *zfsvfs, boolean_t unmounting)
 	mutex_exit(&zfsvfs->z_znodes_lock);
 
 	/*
-	 * If we are unmounting, set the unmounted flag and let new vops
+	 * If we are unmounting, set the unmounted flag and let new VFS ops
 	 * unblock.  zfs_inactive will have the unmounted behavior, and all
-	 * other vops will fail with EIO.
+	 * other VFS ops will fail with EIO.
 	 */
 	if (unmounting) {
 		zfsvfs->z_unmounted = B_TRUE;
@@ -2402,6 +2459,14 @@ zfs_vfs_unmount(struct mount *mp, int mntflags, vfs_context_t context)
 			}
 		}
 	}
+
+    dprintf("Signalling reclaim sync\n");
+	/* We just did final sync, tell reclaim to mop it up */
+    cv_signal(&zfsvfs->z_reclaim_thr_cv);
+    /* Not the classiest sync control ... */
+    delay(hz);
+
+
 #endif
 
 #ifdef sun
@@ -2441,14 +2506,19 @@ zfs_vfs_unmount(struct mount *mp, int mntflags, vfs_context_t context)
 		 * Unset the objset user_ptr.
 		 */
 		mutex_enter(&os->os_user_ptr_lock);
+        dprintf("mutex\n");
 		dmu_objset_set_user(os, NULL);
+        dprintf("set\n");
 		mutex_exit(&os->os_user_ptr_lock);
 
 		/*
 		 * Finally release the objset
 		 */
+        dprintf("disown\n");
 		dmu_objset_disown(os, zfsvfs);
 	}
+
+    dprintf("OS released\n");
 
 	/*
 	 * We can now safely destroy the '.zfs' directory node.
@@ -2485,6 +2555,8 @@ zfs_vget_internal(zfsvfs_t *zfsvfs, ino64_t ino, vnode_t **vpp)
 	if (ino == ZFSCTL_INO_ROOT || ino == ZFSCTL_INO_SNAPDIR ||
 	    (zfsvfs->z_shares_dir != 0 && ino == zfsvfs->z_shares_dir))
 		return (EOPNOTSUPP);
+
+    /* We can not be locked during zget. */
 
 	err = zfs_zget(zfsvfs, ino, &zp);
 
@@ -2762,10 +2834,13 @@ zfs_resume_fs(zfsvfs_t *zfsvfs, const char *osname)
 		zfs_set_fuid_feature(zfsvfs);
 
 		/*
-		 * Attempt to re-establish all the active znodes with
-		 * their dbufs.  If a zfs_rezget() fails, then we'll let
-		 * any potential callers discover that via ZFS_ENTER_VERIFY_VP
-		 * when they try to use their znode.
+		 * Attempt to re-establish all the active inodes with their
+		 * dbufs.  If a zfs_rezget() fails, then we unhash the inode
+		 * and mark it stale.  This prevents a collision if a new
+		 * inode/object is created which must use the same inode
+		 * number.  The stale inode will be be released when the
+		 * VFS prunes the dentry holding the remaining references
+		 * on the stale inode.
 		 */
 		mutex_enter(&zfsvfs->z_znodes_lock);
 		for (zp = list_head(&zfsvfs->z_all_znodes); zp;

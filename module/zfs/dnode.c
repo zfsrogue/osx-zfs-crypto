@@ -139,32 +139,32 @@ dnode_dest(void *arg, void *unused)
 		ASSERT(!list_link_active(&dn->dn_dirty_link[i]));
 		avl_destroy(&dn->dn_ranges[i]);
 		list_destroy(&dn->dn_dirty_records[i]);
-		ASSERT3U(dn->dn_next_nblkptr[i], ==, 0);
-		ASSERT3U(dn->dn_next_nlevels[i], ==, 0);
-		ASSERT3U(dn->dn_next_indblkshift[i], ==, 0);
-		ASSERT3U(dn->dn_next_bonustype[i], ==, 0);
-		ASSERT3U(dn->dn_rm_spillblk[i], ==, 0);
-		ASSERT3U(dn->dn_next_bonuslen[i], ==, 0);
-		ASSERT3U(dn->dn_next_blksz[i], ==, 0);
+		ASSERT0(dn->dn_next_nblkptr[i]);
+		ASSERT0(dn->dn_next_nlevels[i]);
+		ASSERT0(dn->dn_next_indblkshift[i]);
+		ASSERT0(dn->dn_next_bonustype[i]);
+		ASSERT0(dn->dn_rm_spillblk[i]);
+		ASSERT0(dn->dn_next_bonuslen[i]);
+		ASSERT0(dn->dn_next_blksz[i]);
 	}
 
-	ASSERT3U(dn->dn_allocated_txg, ==, 0);
-	ASSERT3U(dn->dn_free_txg, ==, 0);
-	ASSERT3U(dn->dn_assigned_txg, ==, 0);
-	ASSERT3U(dn->dn_dirtyctx, ==, 0);
+	ASSERT0(dn->dn_allocated_txg);
+	ASSERT0(dn->dn_free_txg);
+	ASSERT0(dn->dn_assigned_txg);
+	ASSERT0(dn->dn_dirtyctx);
 	ASSERT3P(dn->dn_dirtyctx_firstset, ==, NULL);
 	ASSERT3P(dn->dn_bonus, ==, NULL);
 	ASSERT(!dn->dn_have_spill);
 	ASSERT3P(dn->dn_zio, ==, NULL);
-	ASSERT3U(dn->dn_oldused, ==, 0);
-	ASSERT3U(dn->dn_oldflags, ==, 0);
-	ASSERT3U(dn->dn_olduid, ==, 0);
-	ASSERT3U(dn->dn_oldgid, ==, 0);
-	ASSERT3U(dn->dn_newuid, ==, 0);
-	ASSERT3U(dn->dn_newgid, ==, 0);
-	ASSERT3U(dn->dn_id_flags, ==, 0);
+	ASSERT0(dn->dn_oldused);
+	ASSERT0(dn->dn_oldflags);
+	ASSERT0(dn->dn_olduid);
+	ASSERT0(dn->dn_oldgid);
+	ASSERT0(dn->dn_newuid);
+	ASSERT0(dn->dn_newgid);
+	ASSERT0(dn->dn_id_flags);
 
-	ASSERT3U(dn->dn_dbufs_count, ==, 0);
+	ASSERT0(dn->dn_dbufs_count);
 	list_destroy(&dn->dn_dbufs);
 }
 
@@ -361,7 +361,7 @@ dnode_rm_spill(dnode_t *dn, dmu_tx_t *tx)
 static void
 dnode_setdblksz(dnode_t *dn, int size)
 {
-	ASSERT3U(P2PHASE(size, SPA_MINBLOCKSIZE), ==, 0);
+	ASSERT0(P2PHASE(size, SPA_MINBLOCKSIZE));
 	ASSERT3U(size, <=, SPA_MAXBLOCKSIZE);
 	ASSERT3U(size, >=, SPA_MINBLOCKSIZE);
 	ASSERT3U(size >> SPA_MINBLOCKSHIFT, <,
@@ -370,7 +370,7 @@ dnode_setdblksz(dnode_t *dn, int size)
 	dn->dn_datablkszsec = size >> SPA_MINBLOCKSHIFT;
 	dn->dn_datablkshift = ISP2(size) ? highbit(size - 1) : 0;
 }
-
+int dnode_other = 0;
 static dnode_t *
 dnode_create(objset_t *os, dnode_phys_t *dnp, dmu_buf_impl_t *db,
     uint64_t object, dnode_handle_t *dnh)
@@ -423,6 +423,8 @@ dnode_create(objset_t *os, dnode_phys_t *dnp, dmu_buf_impl_t *db,
 	mutex_exit(&os->os_lock);
 
 	arc_space_consume(sizeof (dnode_t), ARC_SPACE_OTHER);
+    dnode_other++;
+
 	return (dn);
 }
 
@@ -472,6 +474,7 @@ dnode_destroy(dnode_t *dn)
 	dmu_zfetch_rele(&dn->dn_zfetch);
 	kmem_cache_free(dnode_cache, dn);
 	arc_space_return(sizeof (dnode_t), ARC_SPACE_OTHER);
+    dnode_other--;
 }
 
 void
@@ -506,24 +509,24 @@ dnode_allocate(dnode_t *dn, dmu_object_type_t ot, int blocksize, int ibs,
 	ASSERT(DMU_OT_IS_VALID(bonustype));
 	ASSERT3U(bonuslen, <=, DN_MAX_BONUSLEN);
 	ASSERT(dn->dn_type == DMU_OT_NONE);
-	ASSERT3U(dn->dn_maxblkid, ==, 0);
-	ASSERT3U(dn->dn_allocated_txg, ==, 0);
-	ASSERT3U(dn->dn_assigned_txg, ==, 0);
+	ASSERT0(dn->dn_maxblkid);
+	ASSERT0(dn->dn_allocated_txg);
+	ASSERT0(dn->dn_assigned_txg);
 	ASSERT(refcount_is_zero(&dn->dn_tx_holds));
 	ASSERT3U(refcount_count(&dn->dn_holds), <=, 1);
 	ASSERT3P(list_head(&dn->dn_dbufs), ==, NULL);
 
 	for (i = 0; i < TXG_SIZE; i++) {
-		ASSERT3U(dn->dn_next_nblkptr[i], ==, 0);
-		ASSERT3U(dn->dn_next_nlevels[i], ==, 0);
-		ASSERT3U(dn->dn_next_indblkshift[i], ==, 0);
-		ASSERT3U(dn->dn_next_bonuslen[i], ==, 0);
-		ASSERT3U(dn->dn_next_bonustype[i], ==, 0);
-		ASSERT3U(dn->dn_rm_spillblk[i], ==, 0);
-		ASSERT3U(dn->dn_next_blksz[i], ==, 0);
+		ASSERT0(dn->dn_next_nblkptr[i]);
+		ASSERT0(dn->dn_next_nlevels[i]);
+		ASSERT0(dn->dn_next_indblkshift[i]);
+		ASSERT0(dn->dn_next_bonuslen[i]);
+		ASSERT0(dn->dn_next_bonustype[i]);
+		ASSERT0(dn->dn_rm_spillblk[i]);
+		ASSERT0(dn->dn_next_blksz[i]);
 		ASSERT(!list_link_active(&dn->dn_dirty_link[i]));
 		ASSERT3P(list_head(&dn->dn_dirty_records[i]), ==, NULL);
-		ASSERT3U(avl_numnodes(&dn->dn_ranges[i]), ==, 0);
+		ASSERT0(avl_numnodes(&dn->dn_ranges[i]));
 	}
 
 	dn->dn_type = ot;
@@ -565,7 +568,7 @@ dnode_reallocate(dnode_t *dn, dmu_object_type_t ot, int blocksize,
 
 	ASSERT3U(blocksize, >=, SPA_MINBLOCKSIZE);
 	ASSERT3U(blocksize, <=, SPA_MAXBLOCKSIZE);
-	ASSERT3U(blocksize % SPA_MINBLOCKSIZE, ==, 0);
+	ASSERT0(blocksize % SPA_MINBLOCKSIZE);
 	ASSERT(dn->dn_object != DMU_META_DNODE_OBJECT || dmu_tx_private_ok(tx));
 	ASSERT(tx->tx_txg != 0);
 	ASSERT((bonustype == DMU_OT_NONE && bonuslen == 0) ||
@@ -926,15 +929,23 @@ void
 dnode_special_close(dnode_handle_t *dnh)
 {
 	dnode_t *dn = dnh->dnh_dnode;
-
+    int count = 0;
 	/*
 	 * Wait for final references to the dnode to clear.  This can
 	 * only happen if the arc is asyncronously evicting state that
 	 * has a hold on this dnode while we are trying to evict this
 	 * dnode.
 	 */
-	while (refcount_count(&dn->dn_holds) > 0)
-		delay(1);
+	while (refcount_count(&dn->dn_holds) > 0) {
+		delay(hz);
+        if (count++ > 9) {
+            printf("dnode: ARC release bug triggered: %p (%lld)-- sorry\n", dn,
+                   refcount_count(&dn->dn_holds));
+            count = 0;
+            refcount_remove(&dn->dn_holds, NULL);
+            //            panic("BOOOOOOOM");
+        }
+    }
 	zrl_add(&dnh->dnh_zrlock);
 	dnode_destroy(dn); /* implicit zrl_remove() */
 	zrl_destroy(&dnh->dnh_zrlock);
@@ -1035,6 +1046,7 @@ dnode_hold_impl(objset_t *os, uint64_t object, int flag,
 			return (EEXIST);
 		DNODE_VERIFY(dn);
 		(void) refcount_add(&dn->dn_holds, tag);
+
 		*dnp = dn;
 		return (0);
 	}
@@ -1123,6 +1135,9 @@ dnode_hold_impl(objset_t *os, uint64_t object, int flag,
 
 	if (refcount_add(&dn->dn_holds, tag) == 1)
 		dbuf_add_ref(db, dnh);
+
+    dprintf("dnode: 2+dn_hold %d\n", refcount_count(&dn->dn_holds));
+
 	/* Now we can rely on the hold to prevent the dnode from moving. */
 	zrl_remove(&dnh->dnh_zrlock);
 
@@ -1158,6 +1173,7 @@ dnode_add_ref(dnode_t *dn, void *tag)
 		return (FALSE);
 	}
 	VERIFY(1 < refcount_add(&dn->dn_holds, tag));
+
 	mutex_exit(&dn->dn_mtx);
 	return (TRUE);
 }
@@ -1172,6 +1188,7 @@ dnode_rele(dnode_t *dn, void *tag)
 
 	mutex_enter(&dn->dn_mtx);
 	refs = refcount_remove(&dn->dn_holds, tag);
+    dprintf("dnode: -dn_hold %d\n", refcount_count(&dn->dn_holds));
 	mutex_exit(&dn->dn_mtx);
 
 	/*
@@ -1236,9 +1253,9 @@ dnode_setdirty(dnode_t *dn, dmu_tx_t *tx)
 
 	ASSERT(!refcount_is_zero(&dn->dn_holds) || list_head(&dn->dn_dbufs));
 	ASSERT(dn->dn_datablksz != 0);
-	ASSERT3U(dn->dn_next_bonuslen[txg&TXG_MASK], ==, 0);
-	ASSERT3U(dn->dn_next_blksz[txg&TXG_MASK], ==, 0);
-	ASSERT3U(dn->dn_next_bonustype[txg&TXG_MASK], ==, 0);
+	ASSERT0(dn->dn_next_bonuslen[txg&TXG_MASK]);
+	ASSERT0(dn->dn_next_blksz[txg&TXG_MASK]);
+	ASSERT0(dn->dn_next_bonustype[txg&TXG_MASK]);
 
 	dprintf_ds(os->os_dsl_dataset, "obj=%llu txg=%llu\n",
 	    dn->dn_object, txg);
@@ -1588,7 +1605,7 @@ dnode_free_range(dnode_t *dn, uint64_t off, uint64_t len, dmu_tx_t *tx)
 	else
 		tail = P2PHASE(len, blksz);
 
-	ASSERT3U(P2PHASE(off, blksz), ==, 0);
+	ASSERT0(P2PHASE(off, blksz));
 	/* zero out any partial block data at the end of the range */
 	if (tail) {
 		if (len < tail)
@@ -1770,7 +1787,7 @@ dnode_diduse_space(dnode_t *dn, int64_t delta)
 	space += delta;
 	if (spa_version(dn->dn_objset->os_spa) < SPA_VERSION_DNODE_BYTES) {
 		ASSERT((dn->dn_phys->dn_flags & DNODE_FLAG_USED_BYTES) == 0);
-		ASSERT3U(P2PHASE(space, 1<<DEV_BSHIFT), ==, 0);
+		ASSERT0(P2PHASE(space, 1<<DEV_BSHIFT));
 		dn->dn_phys->dn_used = space >> DEV_BSHIFT;
 	} else {
 		dn->dn_phys->dn_used = space;

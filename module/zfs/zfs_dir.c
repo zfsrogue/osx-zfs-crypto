@@ -552,7 +552,7 @@ zfs_purgedir(znode_t *dzp)
 
 /*
 	    ASSERT((ZTOV(xzp)->v_type == VREG) ||
-		    (ZTOV(xzp)->v_type == VLNK));  
+		    (ZTOV(xzp)->v_type == VLNK));
 */
 
 		tx = dmu_tx_create(zfsvfs->z_os);
@@ -586,6 +586,11 @@ zfs_purgedir(znode_t *dzp)
 	return (skipped);
 }
 
+
+/*
+ * This function is either called directly from reclaim, or in a delayed
+ * manner, so the value of zp->z_vnode may be NULL.
+ */
 void
 zfs_rmnode(znode_t *zp)
 {
@@ -595,6 +600,7 @@ zfs_rmnode(znode_t *zp)
 	dmu_tx_t	*tx;
 	uint64_t	acl_obj;
 	uint64_t	xattr_obj;
+	uint64_t	count;
 	int		error;
 
 	ASSERT(zp->z_links == 0);
@@ -602,15 +608,30 @@ zfs_rmnode(znode_t *zp)
 	/*
 	 * If this is an attribute directory, purge its contents.
 	 */
-	if (ZTOV(zp) != NULL && vnode_isdir(ZTOV(zp)) &&
+	if (IFTOVT((mode_t)zp->z_mode) == VDIR &&
 	    (zp->z_pflags & ZFS_XATTR)) {
-		if (zfs_purgedir(zp) != 0) {
-			/*
-			 * Not enough space to delete some xattrs.
-			 * Leave it in the unlinked set.
-			 */
+
+		error = zap_count(os, zp->z_id, &count);
+		if (error) {
 			zfs_znode_dmu_fini(zp);
-			zfs_znode_free(zp);
+			return;
+		}
+
+		if (count > 0) {
+			taskq_t *taskq;
+
+			/*
+			 * There are still directory entries in this xattr
+			 * directory.  Let zfs_unlinked_drain() deal with
+			 * them to avoid deadlocking this process in the
+			 * zfs_purgedir()->zfs_zget()->ilookup() callpath
+			 * on the xattr inode's I_FREEING bit.
+			 */
+			taskq = dsl_pool_iput_taskq(dmu_objset_pool(os));
+			taskq_dispatch(taskq, (task_func_t *)
+			    zfs_unlinked_drain, zfsvfs, TQ_SLEEP);
+
+			zfs_znode_dmu_fini(zp);
 			return;
 		}
 	}
