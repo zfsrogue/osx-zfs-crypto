@@ -235,7 +235,7 @@ zcrypt_wrap_key(zcrypt_key_t *wrappingkey, zcrypt_key_t *ptkey,
 
 #if _KERNEL
 #ifdef ZFS_CRYPTO_VERBOSE
-    printk("zcrypt 1\n");
+    printf("zcrypt 1\n");
 #endif
 #endif
 	ret = crypto_encrypt(&wmech, &ptkey_cdt, &wrappingkey->zk_key,
@@ -276,7 +276,7 @@ zcrypt_wrap_key(zcrypt_key_t *wrappingkey, zcrypt_key_t *ptkey,
 
 #if _KERNEL
 #ifdef ZFS_CRYPTO_VERBOSE
-    printk("zcrypt 2\n");
+    printf("zcrypt 2\n");
 #endif
 #endif
 	ret = crypto_encrypt(&wmech, &ptkey_cdt, &wrappingkey->zk_key,
@@ -789,7 +789,7 @@ zcrypt_key_lookup(spa_t *spa, uint64_t objset, uint64_t txg)
 	crypto_mechanism_t mech = { 0 };
 
 #ifdef ZFS_CRYPTO_VERBOSE
-    printk("zcrypt_key_lookup enter\n");
+    printf("zcrypt_key_lookup enter\n");
 #endif
 
 	skn = zcrypt_keystore_find_node(spa, objset, B_FALSE);
@@ -822,7 +822,7 @@ zcrypt_key_lookup(spa_t *spa, uint64_t objset, uint64_t txg)
 	mutex_exit(&skn->skn_lock);
 
 #ifdef ZFS_CRYPTO_VERBOSE
-    printk("zcrypt_key_lookup exit: key %p\n", key);
+    printf("zcrypt_key_lookup exit: key %p\n", key);
 #endif
 #endif
 	return (key);

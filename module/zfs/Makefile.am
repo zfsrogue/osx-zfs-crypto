@@ -143,6 +143,7 @@ zfs_SOURCES = \
 	../nvpair/nvpair_alloc_spl.c \
 	../unicode/u8_textprep.c \
 	../unicode/uconv.c \
+	../zcommon/zcrypt_common.c \
 	../zcommon/zfs_comutil.c \
 	../zcommon/zfs_deleg.c \
 	../zcommon/zfs_fletcher.c \

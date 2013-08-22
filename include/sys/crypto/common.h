@@ -60,7 +60,7 @@ extern "C" {
 
 #else	/* _KERNEL */
 
-#include <malloc.h>
+#include <stdlib.h>
 #define	CRYPTO_KMFLAG(x)		(0)
 #define	CRYPTO_ALLOC(sz, kmflag)	malloc((sz))
 #define	CRYPTO_ZALLOC(sz, kmflag)	calloc(1, (sz))
@@ -283,7 +283,7 @@ typedef struct crypto_data {
 		iovec_t cdu_raw;		/* Pointer and length	    */
 
 		/* uio scatter-gather format */
-		uio_t	*cdu_uio;
+		struct uio	*cdu_uio;
 
 		/* mblk scatter-gather format */
         // FIXME

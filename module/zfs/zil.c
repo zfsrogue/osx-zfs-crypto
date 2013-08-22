@@ -323,9 +323,9 @@ zil_read_log_data(zilog_t *zilog, const lr_write_t *lr, void *wbuf)
 	if (BP_IS_ENCRYPTED(bp) && (zilog->zl_header->zh_claim_txg == 0)) {
 	  char *data;
 	  uint64_t size;
-	  
+
 	  zio_flags |= ZIO_FLAG_RAW;
-	  size = BP_GET_PSIE(bp);
+	  size = BP_GET_PSIZE(bp);
 	  data = zio_data_buf_alloc(size);
 	  error = dsl_read_nolock(NULL, zilog->zl_spa, bp, arc_getbuf_func, data,
 				  ZIO_PRIORITY_SYNC_READ, zio_flags, &aflags, &zb);
@@ -333,7 +333,7 @@ zil_read_log_data(zilog_t *zilog, const lr_write_t *lr, void *wbuf)
 	  //   NULL, NULL, ZIO_PRIORITY_SYNC_READ, zio_flags, &zb));
 	  ASSERT(wbuf == NULL);
 	  zio_data_buf_free(data, size);
-	  
+
 	} else {
 	  arc_buf_t *abuf = NULL;
 
@@ -346,7 +346,7 @@ zil_read_log_data(zilog_t *zilog, const lr_write_t *lr, void *wbuf)
 	      bcopy(abuf->b_data, wbuf, arc_buf_size(abuf));
 
 	}
-	  
+
 	return (error);
 }
 
