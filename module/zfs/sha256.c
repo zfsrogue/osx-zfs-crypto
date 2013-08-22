@@ -137,9 +137,9 @@ zio_checksum_SHAMAC(const void *buf, uint64_t size, zio_cksum_t *zcp)
 
     // It is unknown if this function is correct, wrt to Solaris
 #if _KERNEL
-    //#ifdef ZFS_CRYPTO_VERBOSE
+#ifdef ZFS_CRYPTO_VERBOSE
     printf("SHAMAC called.\n");
-    //#endif
+#endif
 #endif
 
 #if 1
