@@ -229,7 +229,7 @@ zil_read_log_block(zilog_t *zilog, const blkptr_t *bp, blkptr_t *nbp, void *dst,
 				  ZIO_PRIORITY_SYNC_READ, zio_flags, &aflags, &zb);
 
 	} else {
-	  error = arc_read(NULL, zilog->zl_spa, bp, 0, arc_getbuf_func,
+	  error = arc_read(NULL, zilog->zl_spa, bp, arc_getbuf_func,
 			   &abuf, ZIO_PRIORITY_SYNC_READ, zio_flags, &aflags, &zb);
 	  if (error)
 	    return (error);
@@ -337,7 +337,7 @@ zil_read_log_data(zilog_t *zilog, const lr_write_t *lr, void *wbuf)
 	} else {
 	  arc_buf_t *abuf = NULL;
 
-	  error = arc_read(NULL, zilog->zl_spa, bp, 0, arc_getbuf_func,
+	  error = arc_read(NULL, zilog->zl_spa, bp, arc_getbuf_func,
 			   &abuf, ZIO_PRIORITY_SYNC_READ, zio_flags, &aflags, &zb);
 	  if (error)
 	    return (error);
