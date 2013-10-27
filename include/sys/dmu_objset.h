@@ -21,6 +21,7 @@
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
+ * Copyright (c) 2012 by Delphix. All rights reserved.
  */
 
 /* Portions Copyright 2010 Robert Milkowski */
@@ -43,6 +44,7 @@ extern "C" {
 
 extern krwlock_t os_lock;
 
+struct dsl_pool;
 struct dsl_dataset;
 struct dsl_crypto_ctx;
 struct dmu_tx;
@@ -116,8 +118,6 @@ struct objset {
 	/* stuff we store for the user */
 	kmutex_t os_user_ptr_lock;
 	void *os_user_ptr;
-
-	/* SA layout/attribute registration */
 	sa_os_t *os_sa;
 
     /* destroying when crypto keys aren't present */
@@ -158,13 +158,10 @@ void dmu_objset_fast_stat(objset_t *os, dmu_objset_stats_t *stat);
 void dmu_objset_space(objset_t *os, uint64_t *refdbytesp, uint64_t *availbytesp,
     uint64_t *usedobjsp, uint64_t *availobjsp);
 uint64_t dmu_objset_fsid_guid(objset_t *os);
-int dmu_objset_find(char *name, int func(const char *, void *), void *arg,
-    int flags);
-int dmu_objset_find_spa(spa_t *spa, const char *name,
-    int func(spa_t *, uint64_t, const char *, void *), void *arg, int flags);
-int dmu_objset_prefetch(const char *name, void *arg);
-void dmu_objset_byteswap(void *buf, size_t size);
-int dmu_objset_evict_dbufs(objset_t *os);
+int dmu_objset_find_dp(struct dsl_pool *dp, uint64_t ddobj,
+    int func(struct dsl_pool *, struct dsl_dataset *, void *),
+    void *arg, int flags);
+void dmu_objset_evict_dbufs(objset_t *os);
 timestruc_t dmu_objset_snap_cmtime(objset_t *os);
 
 /* called from dsl */
@@ -180,6 +177,7 @@ void dmu_objset_userquota_get_ids(dnode_t *dn, boolean_t before, dmu_tx_t *tx);
 boolean_t dmu_objset_userused_enabled(objset_t *os);
 int dmu_objset_userspace_upgrade(objset_t *os);
 boolean_t dmu_objset_userspace_present(objset_t *os);
+int dmu_fsname(const char *snapname, char *buf);
 
 void dmu_objset_init(void);
 void dmu_objset_fini(void);

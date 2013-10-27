@@ -1,9 +1,9 @@
 include $(top_srcdir)/config/Rules.am
 
+AUTOMAKE_OPTIONS = subdir-objects
+
 INFO_PLIST = Info.plist
 PLIST_STRING = InfoPlist.strings
-
-SUBDIRS=KernelExports
 
 ZFS_META_VERSION = @ZFS_META_VERSION@
 ZFS_DEBUG_STR = @ZFS_DEBUG_STR@
@@ -29,8 +29,7 @@ CFLAGS_KMOD = \
 	-DZFS_META_RELEASE=\"@ZFS_META_RELEASE@\" \
 	-I$(top_srcdir)/include \
 	-I@SPL_OBJ@ -I@SPL_OBJ@/include \
-	-I/System/Library/Frameworks/Kernel.framework/Headers \
-	-I/System/Library/Frameworks/Kernel.framework/PrivateHeaders
+	-I@KERNELSRC@
 
 LINKFLAGS_KMOD = \
 	-Xlinker \
@@ -38,7 +37,6 @@ LINKFLAGS_KMOD = \
 	-nostdlib \
 	-lkmodc++ \
 	-lkmod \
-	-lcpp_kext \
 	-lcc_kext
 
 bin_PROGRAMS = zfs.kext
@@ -68,12 +66,15 @@ zfs_SOURCES = \
 	dsl_dataset.c \
 	dsl_deadlist.c \
 	dsl_deleg.c \
+	dsl_destroy.c \
 	dsl_dir.c \
 	dsl_pool.c \
 	dsl_prop.c \
 	dsl_scan.c \
 	dsl_synctask.c \
+	dsl_userhold.c \
 	fm.c \
+	gfs.c \
 	gzip.c \
 	lzjb.c \
 	lz4.c \
@@ -166,14 +167,7 @@ zfs.kext$(EXEEXT): zfs $(PLIST_STRING) $(INFO_PLIST)
 	cp -f $(INFO_PLIST) zfs.kext/Contents/
 	cp -f $(PLIST_STRING) zfs.kext/Contents/Resources/English.lproj/
 	cp -f zfs zfs.kext/Contents/MacOS/
-	mkdir -p zfs.kext/Contents/Plugins/KernelExports.kext/
-	cp -f KernelExports/KernelExports zfs.kext/Contents/Plugins/KernelExports.kext/
-	cp -f KernelExports/Info.plist zfs.kext/Contents/Plugins/KernelExports.kext/
-	cp -f KernelExports/version.plist zfs.kext/Contents/Plugins/KernelExports.kext/
 	kextlibs -undef-symbols -e -r $(SPL_KMODDIR) -xml zfs.kext/ || echo Ignoring errors
-	mkdir -p KernelExports.kext/Contents/MacOS
-	cp -f KernelExports/KernelExports KernelExports.kext/Contents/MacOS/
-	cp -f KernelExports/Info.plist KernelExports.kext/Contents/
 
 # Show more information if there are linking problems.
 debug-kext-linking:

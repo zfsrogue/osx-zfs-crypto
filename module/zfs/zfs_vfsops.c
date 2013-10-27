@@ -126,7 +126,10 @@ const vol_capabilities_attr_t zfs_capabilities = {
 		/* Interface capabilities we support: */
 		VOL_CAP_INT_ATTRLIST |
 		VOL_CAP_INT_NFSEXPORT |
-		VOL_CAP_INT_READDIRATTR |
+        /*	VOL_CAP_INT_READDIRATTR |*/
+        /* As the readdirattr function has not been updated since maczfs,
+         * it has been decided to disable this functionality, Darwin will
+         * adjust and use readdir, and getattr instead. */
 		VOL_CAP_INT_VOL_RENAME |
 		VOL_CAP_INT_ADVLOCK |
 		VOL_CAP_INT_FLOCK |
@@ -160,7 +163,7 @@ const vol_capabilities_attr_t zfs_capabilities = {
 		VOL_CAP_INT_SEARCHFS |
 		VOL_CAP_INT_ATTRLIST |
 		VOL_CAP_INT_NFSEXPORT |
-		VOL_CAP_INT_READDIRATTR |
+        /*	VOL_CAP_INT_READDIRATTR |*/
 		VOL_CAP_INT_EXCHANGEDATA |
 		VOL_CAP_INT_COPYFILE |
 		VOL_CAP_INT_ALLOCATE |
@@ -343,45 +346,28 @@ zfs_create_unique_device(dev_t *dev)
 static void
 atime_changed_cb(void *arg, uint64_t newval)
 {
-#if 0
 	zfsvfs_t *zfsvfs = arg;
 
 	if (newval == TRUE) {
 		zfsvfs->z_atime = TRUE;
-		//zfsvfs->z_vfs->vfs_flag &= ~MNT_NOATIME;
-		vfs_clearmntopt(zfsvfs->z_vfs, MNTOPT_NOATIME);
-		vfs_setmntopt(zfsvfs->z_vfs, MNTOPT_ATIME, NULL, 0);
+        vfs_clearflags(zfsvfs->z_vfs, (uint64_t)MNT_NOATIME);
 	} else {
 		zfsvfs->z_atime = FALSE;
-		//zfsvfs->z_vfs->vfs_flag |= MNT_NOATIME;
-		vfs_clearmntopt(zfsvfs->z_vfs, MNTOPT_ATIME);
-		vfs_setmntopt(zfsvfs->z_vfs, MNTOPT_NOATIME, NULL, 0);
+        vfs_setflags(zfsvfs->z_vfs, (uint64_t)MNT_NOATIME);
 	}
-#endif
 }
 
 static void
 xattr_changed_cb(void *arg, uint64_t newval)
 {
-#if 0
 	zfsvfs_t *zfsvfs = arg;
 
 	if (newval == TRUE) {
 		/* XXX locking on vfs_flag? */
-#ifdef TODO
-		zfsvfs->z_vfs->vfs_flag |= VFS_XATTR;
-#endif
-		vfs_clearmntopt(zfsvfs->z_vfs, MNTOPT_NOXATTR);
-		vfs_setmntopt(zfsvfs->z_vfs, MNTOPT_XATTR, NULL, 0);
+        vfs_clearflags(zfsvfs->z_vfs, (uint64_t)MNT_NOUSERXATTR);
 	} else {
-		/* XXX locking on vfs_flag? */
-#ifdef TODO
-		zfsvfs->z_vfs->vfs_flag &= ~VFS_XATTR;
-#endif
-		vfs_clearmntopt(zfsvfs->z_vfs, MNTOPT_XATTR);
-		vfs_setmntopt(zfsvfs->z_vfs, MNTOPT_NOXATTR, NULL, 0);
+        vfs_setflags(zfsvfs->z_vfs, (uint64_t)MNT_NOUSERXATTR);
 	}
-#endif
 }
 
 static void
@@ -400,54 +386,50 @@ blksz_changed_cb(void *arg, uint64_t newval)
 static void
 readonly_changed_cb(void *arg, uint64_t newval)
 {
-#if 0
 	zfsvfs_t *zfsvfs = arg;
-	if (newval) {
+	if (newval == TRUE) {
 		/* XXX locking on vfs_flag? */
-		//zfsvfs->z_vfs->vfs_flag |= VFS_RDONLY;
-		vfs_clearmntopt(zfsvfs->z_vfs, MNTOPT_RW);
-		vfs_setmntopt(zfsvfs->z_vfs, MNTOPT_RO, NULL, 0);
-	} else {
-		/* XXX locking on vfs_flag? */
-		//zfsvfs->z_vfs->vfs_flag &= ~VFS_RDONLY;
-		vfs_clearmntopt(zfsvfs->z_vfs, MNTOPT_RO);
-		vfs_setmntopt(zfsvfs->z_vfs, MNTOPT_RW, NULL, 0);
-	}
+
+        // We need to release the mtime_vp when readonly, as it will not
+        // call VNOP_SYNC in RDONLY.
+
+#if 0
+        if (zfsvfs->z_mtime_vp) {
+            vnode_rele(zfsvfs->z_mtime_vp);
+            vnode_recycle(zfsvfs->z_mtime_vp);
+            zfsvfs->z_mtime_vp = NULL;
+        }
 #endif
+        // Flush any writes
+        //vflush(mp, NULLVP, SKIPSYSTEM);
+
+        vfs_setflags(zfsvfs->z_vfs, (uint64_t)MNT_RDONLY);
+	} else {
+        // FIXME, we don't re-open mtime_vp here.
+        vfs_clearflags(zfsvfs->z_vfs, (uint64_t)MNT_RDONLY);
+	}
 }
 
 static void
 setuid_changed_cb(void *arg, uint64_t newval)
 {
-#if 0
 	zfsvfs_t *zfsvfs = arg;
 	if (newval == FALSE) {
-		//zfsvfs->z_vfs->vfs_flag |= VFS_NOSETUID;
-		vfs_clearmntopt(zfsvfs->z_vfs, MNTOPT_SETUID);
-		vfs_setmntopt(zfsvfs->z_vfs, MNTOPT_NOSETUID, NULL, 0);
+        vfs_setflags(zfsvfs->z_vfs, (uint64_t)MNT_NOSUID);
 	} else {
-		//zfsvfs->z_vfs->vfs_flag &= ~VFS_NOSETUID;
-		vfs_clearmntopt(zfsvfs->z_vfs, MNTOPT_NOSETUID);
-		vfs_setmntopt(zfsvfs->z_vfs, MNTOPT_SETUID, NULL, 0);
+        vfs_clearflags(zfsvfs->z_vfs, (uint64_t)MNT_NOSUID);
 	}
-#endif
 }
 
 static void
 exec_changed_cb(void *arg, uint64_t newval)
 {
-#if 0
 	zfsvfs_t *zfsvfs = arg;
 	if (newval == FALSE) {
-		//zfsvfs->z_vfs->vfs_flag |= VFS_NOEXEC;
-		vfs_clearmntopt(zfsvfs->z_vfs, MNTOPT_EXEC);
-		vfs_setmntopt(zfsvfs->z_vfs, MNTOPT_NOEXEC, NULL, 0);
+        vfs_setflags(zfsvfs->z_vfs, (uint64_t)MNT_NOEXEC);
 	} else {
-		//zfsvfs->z_vfs->vfs_flag &= ~VFS_NOEXEC;
-		vfs_clearmntopt(zfsvfs->z_vfs, MNTOPT_NOEXEC);
-		vfs_setmntopt(zfsvfs->z_vfs, MNTOPT_EXEC, NULL, 0);
+        vfs_clearflags(zfsvfs->z_vfs, (uint64_t)MNT_NOEXEC);
 	}
-#endif
 }
 
 /*
@@ -477,7 +459,6 @@ static void
 snapdir_changed_cb(void *arg, uint64_t newval)
 {
 	zfsvfs_t *zfsvfs = arg;
-
 	zfsvfs->z_show_ctldir = newval;
 }
 
@@ -505,6 +486,30 @@ acl_inherit_changed_cb(void *arg, uint64_t newval)
 	zfsvfs->z_acl_inherit = newval;
 }
 
+#ifdef __APPLE__
+static void
+finderbrowse_changed_cb(void *arg, uint64_t newval)
+{
+	zfsvfs_t *zfsvfs = arg;
+	if (newval == FALSE) {
+        vfs_setflags(zfsvfs->z_vfs, (uint64_t)MNT_DONTBROWSE);
+	} else {
+        vfs_clearflags(zfsvfs->z_vfs, (uint64_t)MNT_DONTBROWSE);
+	}
+}
+static void
+ignoreowner_changed_cb(void *arg, uint64_t newval)
+{
+	zfsvfs_t *zfsvfs = arg;
+	if (newval == FALSE) {
+        vfs_clearflags(zfsvfs->z_vfs, (uint64_t)MNT_IGNORE_OWNERSHIP);
+	} else {
+        vfs_setflags(zfsvfs->z_vfs, (uint64_t)MNT_IGNORE_OWNERSHIP);
+	}
+}
+
+#endif
+
 static int
 zfs_register_callbacks(struct mount *vfsp)
 {
@@ -512,7 +517,7 @@ zfs_register_callbacks(struct mount *vfsp)
 
 	objset_t *os = NULL;
 	zfsvfs_t *zfsvfs = NULL;
-	uint64_t nbmand;
+	uint64_t nbmand = 0;
 	boolean_t readonly = B_FALSE;
 	boolean_t do_readonly = B_FALSE;
 	boolean_t setuid = B_FALSE;
@@ -527,6 +532,10 @@ zfs_register_callbacks(struct mount *vfsp)
 	boolean_t do_xattr = B_FALSE;
 	boolean_t atime = B_FALSE;
 	boolean_t do_atime = B_FALSE;
+	boolean_t finderbrowse = B_FALSE;
+	boolean_t do_finderbrowse = B_FALSE;
+	boolean_t ignoreowner = B_FALSE;
+	boolean_t do_ignoreowner = B_FALSE;
 	int error = 0;
 
 	ASSERT(vfsp);
@@ -547,47 +556,57 @@ zfs_register_callbacks(struct mount *vfsp)
 	 * of mount options, we stash away the current values and
 	 * restore them after we register the callbacks.
 	 */
-#if 0
-	if (vfs_optionisset(vfsp, MNTOPT_RO, NULL) ||
+#define vfs_optionisset(X, Y, Z) (vfs_flags(X)&(Y))
+
+	if (vfs_optionisset(vfsp, MNT_RDONLY, NULL) ||
 	    !spa_writeable(dmu_objset_spa(os))) {
 		readonly = B_TRUE;
 		do_readonly = B_TRUE;
-	} else if (vfs_optionisset(vfsp, MNTOPT_RW, NULL)) {
+	} else {
 		readonly = B_FALSE;
 		do_readonly = B_TRUE;
 	}
-	if (vfs_optionisset(vfsp, MNTOPT_NOSUID, NULL)) {
+	if (vfs_optionisset(vfsp, MNT_NOSUID, NULL)) {
 		setuid = B_FALSE;
 		do_setuid = B_TRUE;
 	} else {
-		if (vfs_optionisset(vfsp, MNTOPT_NOSETUID, NULL)) {
-			setuid = B_FALSE;
-			do_setuid = B_TRUE;
-		} else if (vfs_optionisset(vfsp, MNTOPT_SETUID, NULL)) {
-			setuid = B_TRUE;
-			do_setuid = B_TRUE;
-		}
-	}
-	if (vfs_optionisset(vfsp, MNTOPT_NOEXEC, NULL)) {
+        setuid = B_TRUE;
+        do_setuid = B_TRUE;
+    }
+	if (vfs_optionisset(vfsp, MNT_NOEXEC, NULL)) {
 		exec = B_FALSE;
 		do_exec = B_TRUE;
-	} else if (vfs_optionisset(vfsp, MNTOPT_EXEC, NULL)) {
+	} else {
 		exec = B_TRUE;
 		do_exec = B_TRUE;
 	}
-	if (vfs_optionisset(vfsp, MNTOPT_NOXATTR, NULL)) {
+	if (vfs_optionisset(vfsp, MNT_NOUSERXATTR, NULL)) {
 		xattr = B_FALSE;
 		do_xattr = B_TRUE;
-	} else if (vfs_optionisset(vfsp, MNTOPT_XATTR, NULL)) {
+	} else {
 		xattr = B_TRUE;
 		do_xattr = B_TRUE;
 	}
-	if (vfs_optionisset(vfsp, MNTOPT_NOATIME, NULL)) {
+	if (vfs_optionisset(vfsp, MNT_NOATIME, NULL)) {
 		atime = B_FALSE;
 		do_atime = B_TRUE;
-	} else if (vfs_optionisset(vfsp, MNTOPT_ATIME, NULL)) {
+	} else {
 		atime = B_TRUE;
 		do_atime = B_TRUE;
+	}
+	if (vfs_optionisset(vfsp, MNT_DONTBROWSE, NULL)) {
+		finderbrowse = B_FALSE;
+		do_finderbrowse = B_TRUE;
+	} else {
+		finderbrowse = B_TRUE;
+		do_finderbrowse = B_TRUE;
+	}
+	if (vfs_optionisset(vfsp, MNT_IGNORE_OWNERSHIP, NULL)) {
+		ignoreowner = B_TRUE;
+		do_ignoreowner = B_TRUE;
+	} else {
+		ignoreowner = B_FALSE;
+		do_ignoreowner = B_TRUE;
 	}
 
 	/*
@@ -597,6 +616,7 @@ zfs_register_callbacks(struct mount *vfsp)
 	 * This is weird, but it is documented to only be changeable
 	 * at mount time.
 	 */
+#ifdef __LINUX__
 	if (vfs_optionisset(vfsp, MNTOPT_NONBMAND, NULL)) {
 		nbmand = B_FALSE;
 	} else if (vfs_optionisset(vfsp, MNTOPT_NBMAND, NULL)) {
@@ -622,6 +642,7 @@ zfs_register_callbacks(struct mount *vfsp)
 	ds = dmu_objset_ds(os);
 	dsl_pool_config_enter(dmu_objset_pool(os), FTAG);
 	error = dsl_prop_register(ds,
+
 	    zfs_prop_to_name(ZFS_PROP_ATIME), atime_changed_cb, zfsvfs);
 	error = error ? error : dsl_prop_register(ds,
 	    zfs_prop_to_name(ZFS_PROP_XATTR), xattr_changed_cb, zfsvfs);
@@ -640,17 +661,26 @@ zfs_register_callbacks(struct mount *vfsp)
 	error = error ? error : dsl_prop_register(ds,
 	    zfs_prop_to_name(ZFS_PROP_SNAPDIR), snapdir_changed_cb, zfsvfs);
     // This appears to be PROP_PRIVATE, investigate if we want this
-	//error = error ? error : dsl_prop_register(ds,
-    //   zfs_prop_to_name(ZFS_PROP_ACLMODE), acl_mode_changed_cb, zfsvfs);
+	error = error ? error : dsl_prop_register(ds,
+        zfs_prop_to_name(ZFS_PROP_ACLMODE), acl_mode_changed_cb, zfsvfs);
 	error = error ? error : dsl_prop_register(ds,
 	    zfs_prop_to_name(ZFS_PROP_ACLINHERIT), acl_inherit_changed_cb,
 	    zfsvfs);
 	error = error ? error : dsl_prop_register(ds,
 	    zfs_prop_to_name(ZFS_PROP_VSCAN), vscan_changed_cb, zfsvfs);
+#ifdef __APPLE__
+	error = error ? error : dsl_prop_register(ds,
+	    zfs_prop_to_name(ZFS_PROP_APPLE_BROWSE), finderbrowse_changed_cb, zfsvfs);
+	error = error ? error : dsl_prop_register(ds,
+	    zfs_prop_to_name(ZFS_PROP_APPLE_IGNOREOWNER), ignoreowner_changed_cb, zfsvfs);
+#endif
 	dsl_pool_config_exit(dmu_objset_pool(os), FTAG);
 	if (error)
 		goto unregister;
 
+	if (do_readonly)
+		readonly_changed_cb(zfsvfs, readonly);
+#if 0
 	/*
 	 * Invoke our callbacks to restore temporary mount options.
 	 */
@@ -664,8 +694,13 @@ zfs_register_callbacks(struct mount *vfsp)
 		xattr_changed_cb(zfsvfs, xattr);
 	if (do_atime)
 		atime_changed_cb(zfsvfs, atime);
+	if (do_finderbrowse)
+		finderbrowse_changed_cb(zfsvfs, finderbrowse);
+	if (do_ignoreowner)
+		ignoreowner_changed_cb(zfsvfs, ignoreowner);
 
 	nbmand_changed_cb(zfsvfs, nbmand);
+#endif
 
 	return (0);
 
@@ -693,12 +728,18 @@ unregister:
 	    exec_changed_cb, zfsvfs);
 	(void) dsl_prop_unregister(ds, zfs_prop_to_name(ZFS_PROP_SNAPDIR),
 	    snapdir_changed_cb, zfsvfs);
-	//(void) dsl_prop_unregister(ds, zfs_prop_to_name(ZFS_PROP_ACLMODE),
-    //   acl_mode_changed_cb, zfsvfs);
+	(void) dsl_prop_unregister(ds, zfs_prop_to_name(ZFS_PROP_ACLMODE),
+       acl_mode_changed_cb, zfsvfs);
 	(void) dsl_prop_unregister(ds, zfs_prop_to_name(ZFS_PROP_ACLINHERIT),
 	    acl_inherit_changed_cb, zfsvfs);
 	(void) dsl_prop_unregister(ds, zfs_prop_to_name(ZFS_PROP_VSCAN),
 	    vscan_changed_cb, zfsvfs);
+#ifdef __APPLE__
+	(void) dsl_prop_unregister(ds, zfs_prop_to_name(ZFS_PROP_APPLE_BROWSE),
+	    finderbrowse_changed_cb, zfsvfs);
+	(void) dsl_prop_unregister(ds, zfs_prop_to_name(ZFS_PROP_APPLE_IGNOREOWNER),
+	    ignoreowner_changed_cb, zfsvfs);
+#endif
 	return (error);
 }
 
@@ -706,7 +747,7 @@ static int
 zfs_space_delta_cb(dmu_object_type_t bonustype, void *data,
     uint64_t *userp, uint64_t *groupp)
 {
-	int error = 0;
+	//int error = 0;
 
 	/*
 	 * Is it a valid type of object to track?
@@ -1125,7 +1166,7 @@ zfsvfs_create(const char *osname, zfsvfs_t **zfvp)
 	    offsetof(znode_t, z_link_node));
 	list_create(&zfsvfs->z_reclaim_znodes, sizeof (znode_t),
 	    offsetof(znode_t, z_link_node));
-	rrw_init(&zfsvfs->z_teardown_lock/*, B_FALSE*/);
+	rrw_init(&zfsvfs->z_teardown_lock, B_FALSE);
 	rw_init(&zfsvfs->z_teardown_inactive_lock, NULL, RW_DEFAULT, NULL);
 	rw_init(&zfsvfs->z_fuid_lock, NULL, RW_DEFAULT, NULL);
 	for (i = 0; i != ZFS_OBJ_MTX_SZ; i++)
@@ -1385,6 +1426,8 @@ zfs_domount(struct mount *vfsp, dev_t mount_dev, char *osname, vfs_context_t ctx
 	if (dmu_objset_is_snapshot(zfsvfs->z_os)) {
 		uint64_t pval;
 
+        vfs_setflags(vfsp, (u_int64_t)((unsigned int)MNT_AUTOMOUNTED));
+
 		atime_changed_cb(zfsvfs, B_FALSE);
 		readonly_changed_cb(zfsvfs, B_TRUE);
 		if ((error = dsl_prop_get_integer(osname, "xattr", &pval, NULL)))
@@ -1455,15 +1498,20 @@ zfs_unregister_callbacks(zfsvfs_t *zfsvfs)
 		VERIFY(dsl_prop_unregister(ds, "snapdir", snapdir_changed_cb,
 		    zfsvfs) == 0);
 
-        // See discussion in register_callbacks
-		//VERIFY(dsl_prop_unregister(ds, "aclmode", acl_mode_changed_cb,
-        //   zfsvfs) == 0);
+		VERIFY(dsl_prop_unregister(ds, "aclmode", acl_mode_changed_cb,
+            zfsvfs) == 0);
 
 		VERIFY(dsl_prop_unregister(ds, "aclinherit",
 		    acl_inherit_changed_cb, zfsvfs) == 0);
 
 		VERIFY(dsl_prop_unregister(ds, "vscan",
 		    vscan_changed_cb, zfsvfs) == 0);
+#ifdef __APPLE__
+		VERIFY(dsl_prop_unregister(ds, "com.apple.browse",
+		    finderbrowse_changed_cb, zfsvfs) == 0);
+		VERIFY(dsl_prop_unregister(ds, "com.apple.ignoreowner",
+		    ignoreowner_changed_cb, zfsvfs) == 0);
+#endif
 	}
 }
 
@@ -1764,6 +1812,7 @@ out:
 }
 #endif	/* OPENSOLARIS_MOUNTROOT */
 
+#ifdef __LINUX__
 static int
 getpoolname(const char *osname, char *poolname)
 {
@@ -1782,6 +1831,7 @@ getpoolname(const char *osname, char *poolname)
 	}
 	return (0);
 }
+#endif
 
 /*ARGSUSED*/
 int
@@ -1794,6 +1844,7 @@ zfs_vfs_mount(struct mount *vfsp, vnode_t *mvp /*devvp*/,
 	int		canwrite;
 
 #ifdef __APPLE__
+    struct zfs_mount_args mnt_args;
 	size_t		osnamelen = 0;
 
     /*
@@ -1801,22 +1852,31 @@ zfs_vfs_mount(struct mount *vfsp, vnode_t *mvp /*devvp*/,
      */
     if (data) {
 		// 10a286 renames fspec to datasetpath
-        user_addr_t fspec = USER_ADDR_NULL;
+
+        // Clear the struct, so that "flags" is null if only given path.
+        bzero(&mnt_args, sizeof(mnt_args));
+        // Allocate string area
         osname = kmem_alloc(MAXPATHLEN, KM_SLEEP);
 
         if (vfs_context_is64bit(context)) {
-            if ( (error = copyin(data, (caddr_t)&fspec, sizeof(fspec))) )
+            if ( (error = copyin(data, (caddr_t)&mnt_args, sizeof(mnt_args))) )
                 goto out;
         } else {
             user32_addr_t tmp;
             if ( (error = copyin(data, (caddr_t)&tmp, sizeof(tmp))) )
                 goto out;
             /* munge into LP64 addr */
-            fspec = CAST_USER_ADDR_T(tmp);
+            mnt_args.fspec = (char *)CAST_USER_ADDR_T(tmp);
         }
-        if ( (error = copyinstr(fspec, osname, MAXPATHLEN, &osnamelen)) )
+
+        // Copy over the string
+        if ( (error = copyinstr((user_addr_t)mnt_args.fspec, osname,
+                                MAXPATHLEN, &osnamelen)) )
             goto out;
     }
+
+    dprintf("vfs_mount: options %04x path '%s'\n",
+            mnt_args.flags, mnt_args.fspec);
 #endif
 
 #ifdef illumos
@@ -1961,13 +2021,7 @@ zfs_vfs_mount(struct mount *vfsp, vnode_t *mvp /*devvp*/,
 	if (error == 0) {
 		zfsvfs_t *zfsvfs = NULL;
 
-		//Prerequisite for Spotlight use with a given dataset.
-		//This should be controlled by a dataset property with a name like "finderbrowse"
-		#if 0
-		/* Make the Finder treat sub file systems just like a folder */
-		if (strpbrk(osname, "/"))
-			vfs_setflags(vfsp, (u_int64_t)((unsigned int)MNT_DONTBROWSE));
-		#endif
+
 
         	//vfs_setflags(vfsp, (u_int64_t)((unsigned int)MNT_DOVOLFS));
 		/* Indicate to VFS that we support ACLs. */
@@ -1975,6 +2029,9 @@ zfs_vfs_mount(struct mount *vfsp, vnode_t *mvp /*devvp*/,
 
 		/* Advisory locking should be handled at the VFS layer */
 		vfs_setlocklocal(vfsp);
+
+
+#if 0
 
 		/*
 		 * Mac OS X needs a file system modify time
@@ -2020,6 +2077,9 @@ zfs_vfs_mount(struct mount *vfsp, vnode_t *mvp /*devvp*/,
 			 */
 			zfsvfs->z_last_unmount_time = 0xBADC0DE;
 			zfsvfs->z_last_mtime_synced = VTOZ(xdvp)->z_id;
+
+			if (!vfs_isrdonly(vfsp)) {
+
 			flag = vfs_isrdonly(vfsp) ? 0 : ZEXISTS;
 			/* Lookup or create the named attribute. */
 			if ( zfs_obtain_xattr(VTOZ(xdvp), ZFS_MTIME_XATTR,
@@ -2030,17 +2090,22 @@ zfs_vfs_mount(struct mount *vfsp, vnode_t *mvp /*devvp*/,
                 vnode_put(xdvp);
                 goto out;
             }
+
             gethrestime(&now);
 
             ZFS_TIME_ENCODE(&now, VTOZ(xvp)->z_atime);
 			vnode_put(xdvp);
-			vnode_ref(xvp);
 
-			zfsvfs->z_mtime_vp = xvp;
-			ZFS_TIME_DECODE(&modify_time, VTOZ(xvp)->z_atime);
-			zfsvfs->z_last_unmount_time = modify_time.tv_sec;
-			zfsvfs->z_last_mtime_synced = modify_time.tv_sec;
+            /* Can't hold a ref if we are readonly. */
+            if (!vfs_isrdonly(vfsp)) {
 
+                //vnode_ref(xvp);
+
+                zfsvfs->z_mtime_vp = xvp;
+            }
+            ZFS_TIME_DECODE(&modify_time, VTOZ(xvp)->z_atime);
+            zfsvfs->z_last_unmount_time = modify_time.tv_sec;
+            zfsvfs->z_last_mtime_synced = modify_time.tv_sec;
 			/*
 			 * Keep this referenced vnode from impeding an unmount.
 			 *
@@ -2050,7 +2115,11 @@ zfs_vfs_mount(struct mount *vfsp, vnode_t *mvp /*devvp*/,
 			vnode_setnoflush(xvp);
 #endif
 			vnode_put(xvp);
+            } // readonly
+
 		}
+#endif
+
 	}
 #endif /* __APPLE__ */
 
@@ -2153,15 +2222,19 @@ zfs_vfs_getattr(struct mount *mp, struct vfs_attr *fsap, __unused vfs_context_t 
 		VFSATTR_SET_SUPPORTED(fsap, f_create_time);
 	}
 	if (VFSATTR_IS_ACTIVE(fsap, f_modify_time)) {
+#if 0
 		if (zfsvfs->z_mtime_vp != NULL) {
 			znode_t *mzp;
 
 			mzp = VTOZ(zfsvfs->z_mtime_vp);
 			//ZFS_TIME_DECODE(&fsap->f_modify_time, mzp->zp_mtime);
 		} else {
+#endif
 			fsap->f_modify_time.tv_sec = 0;
 			fsap->f_modify_time.tv_nsec = 0;
+#if 0
 		}
+#endif
 		VFSATTR_SET_SUPPORTED(fsap, f_modify_time);
 	}
 	/*
@@ -2176,7 +2249,7 @@ zfs_vfs_getattr(struct mount *mp, struct vfs_attr *fsap, __unused vfs_context_t 
 	if (VFSATTR_IS_ACTIVE(fsap, f_vol_name)) {
 		spa_t *spa = dmu_objset_spa(zfsvfs->z_os);
 		spa_config_enter(spa, SCL_ALL, FTAG, RW_READER);
-		
+
 		/*
 		 * Finder volume name is set to the basename of the mountpoint path,
 		 * unless the mountpoint path is "/" or NULL, in which case we use
@@ -2191,7 +2264,7 @@ zfs_vfs_getattr(struct mount *mp, struct vfs_attr *fsap, __unused vfs_context_t 
 		}
 
 		/*
-		 * Old MacZFS way. Post OS X 10.6 would show pool name as the 
+		 * Old MacZFS way. Post OS X 10.6 would show pool name as the
 		 * volume name for all mounted datasets in Finder.
 		 */
 		//strlcpy(fsap->f_vol_name, spa_name(spa), MAXPATHLEN);
@@ -2389,7 +2462,7 @@ zfs_vfs_unmount(struct mount *mp, int mntflags, vfs_context_t context)
     zfsvfs_t *zfsvfs = vfs_fsprivate(mp);
 	//kthread_t *td = (kthread_t *)curthread;
 	objset_t *os;
-	//cred_t *cr =  (cred_t *)vfs_context_ucred(context);
+	cred_t *cr =  (cred_t *)vfs_context_ucred(context);
 	int ret;
 
     dprintf("+unmount\n");
@@ -2416,22 +2489,47 @@ zfs_vfs_unmount(struct mount *mp, int mntflags, vfs_context_t context)
 	 * Unmount any snapshots mounted under .zfs before unmounting the
 	 * dataset itself.
 	 */
-#ifndef __APPLE__
+    dprintf("z_ctldir check: %p\n",zfsvfs->z_ctldir );
 	if (zfsvfs->z_ctldir != NULL) {
+
 		if ((ret = zfsctl_umount_snapshots(zfsvfs->z_vfs, 0 /*fflag*/, cr)) != 0)
 			return (ret);
-		ret = vflush(zfsvfs->z_vfs, NULLVP, 0);
-		ASSERT(ret == EBUSY);
-		if (!(fflag & MS_FORCE)) {
-			if (zfsvfs->z_ctldir->v_count > 1)
+
+        dprintf("vflush 1\n");
+        ret = vflush(zfsvfs->z_vfs, zfsvfs->z_ctldir, (mntflags & MNT_FORCE) ? FORCECLOSE : 0|SKIPSYSTEM);
+		//ret = vflush(zfsvfs->z_vfs, NULLVP, 0);
+		//ASSERT(ret == EBUSY);
+		if (!(mntflags & MNT_FORCE)) {
+			if (vnode_isinuse(zfsvfs->z_ctldir, 1)) {
+                dprintf("zfsctl vp still in use %p\n", zfsvfs->z_ctldir);
 				return (EBUSY);
-			ASSERT(zfsvfs->z_ctldir->v_count == 1);
+            }
+			//ASSERT(zfsvfs->z_ctldir->v_count == 1);
 		}
+        dprintf("z_ctldir destroy\n");
 		zfsctl_destroy(zfsvfs);
+        dprintf("z_ctldir destroy done\n");
 		ASSERT(zfsvfs->z_ctldir == NULL);
 	}
 
-	if (fflag & MS_FORCE) {
+#if 0
+    // If we are ourselves a snapshot
+	if (dmu_objset_is_snapshot(zfsvfs->z_os)) {
+        struct vnode *vp;
+        printf("We are unmounting a snapshot\n");
+        vp = vfs_vnodecovered(zfsvfs->z_vfs);
+        if (vp) {
+            struct vnop_inactive_args ap;
+            ap.a_vp = vp;
+            printf(".. telling gfs layer\n");
+            gfs_dir_inactive(&ap);
+            printf("..and put\n");
+            vnode_put(vp);
+        }
+    }
+#endif
+
+	if (mntflags & MNT_FORCE) {
 		/*
 		 * Mark file system as unmounted before calling
 		 * vflush(FORCECLOSE). This way we ensure no future vnops
@@ -2441,16 +2539,16 @@ zfs_vfs_unmount(struct mount *mp, int mntflags, vfs_context_t context)
 		zfsvfs->z_unmounted = B_TRUE;
 		rrw_exit(&zfsvfs->z_teardown_lock, FTAG);
 	}
-#endif
 
 	/*
 	 * Flush all the files.
 	 */
-	ret = vflush(mp, NULLVP, (mntflags & MNT_FORCE) ? FORCECLOSE : 0|SKIPSYSTEM);
+	ret = vflush(mp, NULLVP, (mntflags & MNT_FORCE) ? FORCECLOSE|SKIPSYSTEM : SKIPSYSTEM);
+
 	if (ret != 0) {
 		if (!zfsvfs->z_issnap) {
-			zfsctl_create(zfsvfs);
-			ASSERT(zfsvfs->z_ctldir != NULL);
+			//zfsctl_create(zfsvfs);
+			//ASSERT(zfsvfs->z_ctldir != NULL);
 		}
 		return (ret);
 	}
@@ -2464,6 +2562,7 @@ zfs_vfs_unmount(struct mount *mp, int mntflags, vfs_context_t context)
 	 *
 	 * Here we need to release the ref we took on z_mtime_vp during mount.
 	 */
+#if 0
 	if ((ret == 0) || (mntflags & MNT_FORCE)) {
 		if (zfsvfs->z_mtime_vp != NULL) {
 			vnode_t *mvp;
@@ -2472,12 +2571,13 @@ zfs_vfs_unmount(struct mount *mp, int mntflags, vfs_context_t context)
 			zfsvfs->z_mtime_vp = NULL;
 
 			if (vnode_get(mvp) == 0) {
-				vnode_rele(mvp);
+				//vnode_rele(mvp);
 				vnode_recycle(mvp);
 				vnode_put(mvp);
 			}
 		}
 	}
+#endif
 
     dprintf("Signalling reclaim sync\n");
 	/* We just did final sync, tell reclaim to mop it up */
@@ -2544,7 +2644,7 @@ zfs_vfs_unmount(struct mount *mp, int mntflags, vfs_context_t context)
 	 */
 	if (zfsvfs->z_ctldir != NULL)
 		zfsctl_destroy(zfsvfs);
-#ifndef __APPLE__
+#if 0
 	if (zfsvfs->z_issnap) {
 		vnode_t *svp = vfsp->mnt_vnodecovered;
 
@@ -2552,6 +2652,7 @@ zfs_vfs_unmount(struct mount *mp, int mntflags, vfs_context_t context)
 			VN_RELE(svp);
 	}
 #endif
+
     dprintf("freevfs\n");
 	zfs_freevfs(zfsvfs->z_vfs);
 
@@ -3040,10 +3141,12 @@ zfs_set_version(zfsvfs_t *zfsvfs, uint64_t newvers)
 		sa_register_update_callback(os, zfs_sa_upgrade);
 	}
 
+#if 0 // this cos is broken
 	spa_history_log_internal(LOG_DS_UPGRADE,
 	    dmu_objset_spa(os), tx,
 	    "oldver=%llu newver=%llu dataset = %llu", zfsvfs->z_version, newvers,
 	    dmu_objset_id(os));
+#endif
 
 	dmu_tx_commit(tx);
 

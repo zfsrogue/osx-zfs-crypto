@@ -61,6 +61,10 @@
 #include <sys/callb.h>
 #include <sys/unistd.h>
 
+#ifdef _KERNEL
+#include <sys/sysctl.h>
+int debug_vnop_osx_printf = 0;
+#endif
 
 #define	DECLARE_CRED(ap) \
 	cred_t *cr = (cred_t *)vfs_context_ucred((ap)->a_context)
@@ -70,7 +74,7 @@
 	DECLARE_CRED(ap);		\
 	DECLARE_CONTEXT(ap)
 
-//#define dprintf printf
+#define dprintf if(debug_vnop_osx_printf)printf
 
 // Move this somewhere else, maybe autoconf?
 #define HAVE_NAMED_STREAMS 1
@@ -100,7 +104,13 @@ extern struct vnodeopv_desc zfs_symvnodeop_opv_desc;
 extern struct vnodeopv_desc zfs_xdvnodeop_opv_desc;
 extern struct vnodeopv_desc zfs_evnodeop_opv_desc;
 
-#define ZFS_VNOP_TBL_CNT	5
+extern struct vnodeopv_desc zfsctl_ops_root;
+extern struct vnodeopv_desc zfsctl_ops_snapdir;
+extern struct vnodeopv_desc zfsctl_ops_snapshot;
+
+#define ZFS_VNOP_TBL_CNT	8
+
+
 
 static struct vnodeopv_desc *zfs_vnodeop_opv_desc_list[ZFS_VNOP_TBL_CNT] =
 {
@@ -109,6 +119,9 @@ static struct vnodeopv_desc *zfs_vnodeop_opv_desc_list[ZFS_VNOP_TBL_CNT] =
 	&zfs_symvnodeop_opv_desc,
 	&zfs_xdvnodeop_opv_desc,
 	&zfs_evnodeop_opv_desc,
+    &zfsctl_ops_root,
+    &zfsctl_ops_snapdir,
+    &zfsctl_ops_snapshot,
 };
 
 static vfstable_t zfs_vfsconf;
@@ -459,10 +472,15 @@ zfs_vnop_readdir(
       extern int   zfs_readdir( struct vnode *vp, uio_t *uio, cred_t *cr, int *eofp,
                                 int flags, int *a_numdirent);
     */
-    dprintf("+readdir\n");
+    dprintf("+readdir: %p\n", ap->a_vp);
 	*ap->a_numdirent = 0;
 	error = zfs_readdir(ap->a_vp, ap->a_uio, cr, ap->a_eofflag,
                         ap->a_flags, ap->a_numdirent);
+
+    // .zfs dirs can be completely empty
+    if (*ap->a_numdirent == 0)
+        *ap->a_numdirent = 2; // . and ..
+
     dprintf("-readdir %d (nument %d)\n", error, *ap->a_numdirent);
     return error;
 }
@@ -491,6 +509,8 @@ zfs_vnop_fsync(
 
     zfsvfs = zp->z_zfsvfs;
 
+    if (!zfsvfs) return 0;
+
     /*
      * Because vnode_create() can end up calling fsync, which means we would
      * sit around waiting for dmu_tx, while higher up in this thread may
@@ -503,6 +523,7 @@ zfs_vnop_fsync(
     if (mutex_owner(&zfsvfs->z_vnode_create_lock)) {
         return 0;
     }
+    if (zfsvfs->z_vnode_create_lockX) return 0;
 
 	err = zfs_fsync(ap->a_vp, /*flag*/0, cr, ct);
     return err;
@@ -975,6 +996,23 @@ zfs_vnop_pageout(
         return (ENXIO);
     }
 
+
+    // Defer syncs if we are coming through vnode_create()
+    if (mutex_owner(&zfsvfs->z_vnode_create_lock)) {
+        if (!(flags & UPL_NOCOMMIT))
+            ubc_upl_abort(upl, UPL_ABORT_DUMP_PAGES |
+                          UPL_ABORT_FREE_ON_EMPTY);
+        return ENXIO;
+    }
+    // Defer syncs if we are coming through vnode_create()
+    if (zfsvfs->z_vnode_create_lockX) {
+        printf("zfs: awkward pageout exit\n");
+        if (!(flags & UPL_NOCOMMIT))
+            ubc_upl_abort(upl, UPL_ABORT_DUMP_PAGES |
+                          UPL_ABORT_FREE_ON_EMPTY);
+        return ENXIO;
+    }
+
     ZFS_ENTER(zfsvfs);
 
     ASSERT(vn_has_cached_data(vp));
@@ -1042,7 +1080,6 @@ zfs_vnop_pageout(
             goto top;
         }
         dmu_tx_abort(tx);
-        printf("aborting\n");
         goto out;
     }
     if (len <= PAGESIZE) {
@@ -1124,6 +1161,7 @@ zfs_vnop_mmap(
 	mutex_exit(&zp->z_lock);
 
     ZFS_EXIT(zfsvfs);
+    dprintf("-vnop_mmap\n");
     return (0);
 }
 
@@ -1204,12 +1242,18 @@ void vnop_reclaim_thread(void *arg)
         if (zfsvfs->z_reclaim_thread_exit == TRUE) break;
 
 		/* block until needed, or one second, whichever is shorter */
+#if 1
+        //RECLAIM_SIGNAL
 		CALLB_CPR_SAFE_BEGIN(&cpr);
 		(void) cv_timedwait_interruptible(&zfsvfs->z_reclaim_thr_cv,
                                           &zfsvfs->z_reclaim_thr_lock,
                                           (ddi_get_lbolt() + (hz>>1)));
 		CALLB_CPR_SAFE_END(&cpr, &zfsvfs->z_reclaim_thr_lock);
+#else
 
+        delay(hz>>1);
+
+#endif
     } // forever
 
 #ifdef VERBOSE_RECLAIM
@@ -1271,7 +1315,7 @@ zfs_vnop_reclaim(
         mutex_exit(&zfsvfs->z_vnode_create_lock);
     }
 
-#if 0
+#if 1
     if (!has_warned && vnop_num_reclaims > 20000) {
         has_warned = 1;
         printf("ZFS: Reclaim thread appears dead (%llu) -- good luck\n",
@@ -1286,12 +1330,13 @@ zfs_vnop_reclaim(
      */
 
     /*
-     * As it turns out, possibly from the high frequency that reclaims are
-     * called, calling either cv_signal() or cv_broadcast() here will
-     * eventually halt the reclaim thread (cv_wait never returns).
-     * So, we let the reclaim thread wake up when it wants to.
+     * We can either signal the reclaim-thread to wake up for each node
+     * or let it sleep for its own timeout and process nodes in bunches.
+     * We should measure which method is better.
      */
-    //cv_broadcast(&zfsvfs->z_reclaim_thr_cv);
+#ifdef RECLAIM_SIGNAL
+    cv_signal(&zfsvfs->z_reclaim_thr_cv);
+#endif
     return 0;
 }
 
@@ -1386,13 +1431,30 @@ zfs_vnop_pathconf(
         case _PC_CASE_PRESERVING:
                 *valp = 1;
                 break;
+                /* OSX 10.6 does not define this */
+#ifndef _PC_XATTR_SIZE_BITS
+#define _PC_XATTR_SIZE_BITS   26
+#endif
+                /*
+                 * Even though ZFS has 64 bit limit on XATTR size,
+                 * there would appear to be a limit in SMB2 that the bit size
+                 * returned has to be 18, or we will get error from most XATTR
+                 * calls (STATUS_ALLOTTED_SPACE_EXCEEDED)
+                 */
+#ifndef AD_XATTR_SIZE_BITS
+#define AD_XATTR_SIZE_BITS 18
+#endif
+        case _PC_XATTR_SIZE_BITS:
+                *valp = AD_XATTR_SIZE_BITS;
+                break;
 
         case _PC_FILESIZEBITS:
                 *valp = 64;
                 break;
 
         default:
-                error = EINVAL;
+            printf("ZFS: unknown pathconf %d called.\n", ap->a_name);
+            error = EINVAL;
         }
         dprintf("-vnop_patchconf vp %p : %d\n", ap->a_vp, error);
         return error;
@@ -1890,6 +1952,20 @@ out:
 }
 #endif /* HAVE_NAMED_STREAMS */
 
+
+/*
+ * The Darwin kernel's HFS+ appears to implement this by two methods,
+ *
+ * if (ap->a_options & FSOPT_EXCHANGE_DATA_ONLY) is set
+ *    ** Copy the data of the files over (including rsrc)
+ *
+ * if not set
+ *    ** exchange FileID between the two nodes, copy over vnode information
+ *       like that of *time records, uid/gid, flags, mode, linkcount,
+ *       finderinfo, c_desc, c_attr, c_flag, and cache_purge().
+ *
+ * This call is deprecated in 10.8
+ */
 static int
 zfs_vnop_exchange(
 	struct vnop_exchange_args /* {
@@ -1899,6 +1975,35 @@ zfs_vnop_exchange(
 		vfs_context_t a_context;
 	} */ *ap)
 {
+    vnode_t *fvp = ap->a_fvp;
+    vnode_t *tvp = ap->a_tvp;
+    znode_t  *fzp;
+    znode_t  *tzp;
+    zfsvfs_t  *zfsvfs;
+
+    /* The files must be on the same volume. */
+    if (vnode_mount(fvp) != vnode_mount(tvp))
+        return (EXDEV);
+
+    if (fvp == tvp)
+        return (EINVAL);
+
+    /* Only normal files can be exchanged. */
+    if (!vnode_isreg(fvp) || !vnode_isreg(tvp))
+        return (EINVAL);
+
+    fzp = VTOZ(fvp);
+    // tzp = VTOZ(tvp);
+    zfsvfs = fzp->z_zfsvfs;
+
+    ZFS_ENTER(zfsvfs);
+
+
+    /* ADD MISSING CODE HERE */
+
+    ZFS_EXIT(zfsvfs);
+
+
     dprintf("vnop_exchange: ENOTSUP\n");
 	return (ENOTSUP);
 }
@@ -2294,7 +2399,7 @@ struct vnodeopv_entry_desc zfs_dvnodeops_template[] = {
 	{&vnop_setxattr_desc,	(VOPFUNC)zfs_vnop_setxattr},
 	{&vnop_removexattr_desc,(VOPFUNC)zfs_vnop_removexattr},
 	{&vnop_listxattr_desc,	(VOPFUNC)zfs_vnop_listxattr},
-	{&vnop_readdirattr_desc, (VOPFUNC)zfs_vnop_readdirattr},
+    {&vnop_readdirattr_desc, (VOPFUNC)zfs_vnop_readdirattr},
 	{NULL, (VOPFUNC)NULL }
 };
 struct vnodeopv_desc zfs_dvnodeop_opv_desc =
@@ -2514,9 +2619,11 @@ int zfs_znode_getvnode(znode_t *zp, zfsvfs_t *zfsvfs, struct vnode **vpp)
      * vnode_create() has a habit of calling both vnop_reclaim() and
      * vnop_fsync(), which can create havok as we are already holding locks.
      */
-    mutex_enter(&zfsvfs->z_vnode_create_lock);
+    //mutex_enter(&zfsvfs->z_vnode_create_lock);
+    atomic_add_64(&zfsvfs->z_vnode_create_lockX, 1);
     while (vnode_create(VNCREATE_FLAVOR, VCREATESIZE, &vfsp, vpp) != 0);
-    mutex_exit(&zfsvfs->z_vnode_create_lock);
+    atomic_sub_64(&zfsvfs->z_vnode_create_lockX, 1);
+    //mutex_exit(&zfsvfs->z_vnode_create_lock);
 
     dprintf("Assigned zp %p with vp %p\n", zp, *vpp);
 
@@ -2573,5 +2680,6 @@ int zfs_vfsops_fini(void)
 
     return vfs_fsremove(zfs_vfsconf);
 }
+
 
 

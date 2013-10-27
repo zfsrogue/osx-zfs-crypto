@@ -85,6 +85,7 @@ struct zfsvfs {
         uint64_t        z_shares_dir;   /* hidden shares dir */
         kmutex_t	    z_lock;
         kmutex_t	    z_vnode_create_lock;
+        uint64_t z_vnode_create_lockX;
         list_t          z_reclaim_znodes;/* all reclaimed vnodes in the fs*/
         boolean_t       z_reclaim_thread_exit;
         kmutex_t		z_reclaim_thr_lock;
@@ -203,6 +204,9 @@ extern void zfs_fini(void);
 
 extern int  zfs_vnode_lock(vnode_t *vp, int flags);
 extern void zfs_freevfs(struct mount *vfsp);
+
+extern int  zfsvfs_create(const char *osname, zfsvfs_t **zfvp);
+extern void zfsvfs_free(zfsvfs_t *zfsvfs);
 
 
 #ifdef	__cplusplus

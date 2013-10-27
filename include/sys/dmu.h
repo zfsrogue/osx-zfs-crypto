@@ -42,6 +42,7 @@
 #include <sys/param.h>
 #include <sys/cred.h>
 #include <sys/time.h>
+#include <sys/fs/zfs.h>
 #include <sys/uio.h>
 #include <sys/vnode.h>
 
@@ -68,7 +69,8 @@ struct nvlist;
 struct arc_buf;
 struct zio_prop;
 struct sa_handle;
-    struct request; // lund
+struct request; // lund
+struct dsl_dataset;
 
 typedef struct objset objset_t;
 typedef struct dmu_tx dmu_tx_t;
@@ -220,15 +222,10 @@ typedef enum dmu_object_type {
 	DMU_OTN_ZAP_METADATA = DMU_OT(DMU_BSWAP_ZAP, B_TRUE),
 } dmu_object_type_t;
 
-typedef enum dmu_objset_type {
-	DMU_OST_NONE,
-	DMU_OST_META,
-	DMU_OST_ZFS,
-	DMU_OST_ZVOL,
-	DMU_OST_OTHER,			/* For testing only! */
-	DMU_OST_ANY,			/* Be careful! */
-	DMU_OST_NUMTYPES
-} dmu_objset_type_t;
+typedef enum txg_how {
+	TXG_WAIT = 1,
+	TXG_NOWAIT,
+} txg_how_t;
 
 void byteswap_uint64_array(void *buf, size_t size);
 void byteswap_uint32_array(void *buf, size_t size);
@@ -280,8 +277,6 @@ void dmu_objset_disown(objset_t *os, void *tag);
 int dmu_objset_open_ds(struct dsl_dataset *ds, objset_t **osp);
 
 int dmu_objset_evict_dbufs(objset_t *os);
-    // FIXME
-#if 0
 int dmu_objset_create(const char *name, dmu_objset_type_t type, uint64_t flags,
                       struct dsl_crypto_ctx *crypto_ctx,
     void (*func)(objset_t *os, void *arg, cred_t *cr, dmu_tx_t *tx), void *arg);
@@ -289,15 +284,22 @@ int dmu_objset_clone(const char *name, struct dsl_dataset *clone_origin,
     struct dsl_crypto_ctx *crypto_ctx, uint64_t flags);
 #endif
 int dmu_objset_destroy(const char *name, boolean_t defer);
-int dmu_snapshots_destroy_nvl(struct nvlist *snaps, boolean_t defer, char *);
 int dmu_objset_snapshot(char *fsname, char *snapname, char *tag,
     struct nvlist *props, boolean_t recursive, boolean_t temporary, int fd);
     //int dmu_objset_rename(const char *name, const char *newname,
     // boolean_t recursive);
 #define  dmu_objset_rename(old, new, recursive)       dsl_dataset_rename((old), (new), (recursive))
+
+int dmu_objset_clone(const char *name, const char *origin);
+int dsl_destroy_snapshots_nvl(struct nvlist *snaps, boolean_t defer,
+    struct nvlist *errlist);
+int dmu_objset_snapshot_one(const char *fsname, const char *snapname);
+int dmu_objset_snapshot_tmp(const char *, const char *, int);
 int dmu_objset_find(char *name, int func(const char *, void *), void *arg,
     int flags);
 void dmu_objset_byteswap(void *buf, size_t size);
+int dsl_dataset_rename_snapshot(const char *fsname,
+    const char *oldsnapname, const char *newsnapname, boolean_t recursive);
 
 typedef struct dmu_buf {
 	uint64_t db_object;		/* object that this buffer is part of */
@@ -567,7 +569,7 @@ void dmu_tx_hold_spill(dmu_tx_t *tx, uint64_t object);
 void dmu_tx_hold_sa(dmu_tx_t *tx, struct sa_handle *hdl, boolean_t may_grow);
 void dmu_tx_hold_sa_create(dmu_tx_t *tx, int total_size);
 void dmu_tx_abort(dmu_tx_t *tx);
-int dmu_tx_assign(dmu_tx_t *tx, uint64_t txg_how);
+int dmu_tx_assign(dmu_tx_t *tx, enum txg_how txg_how);
 void dmu_tx_wait(dmu_tx_t *tx);
 void dmu_tx_commit(dmu_tx_t *tx);
 
@@ -826,10 +828,8 @@ void dmu_traverse_objset(objset_t *os, uint64_t txg_start,
     dmu_traverse_cb_t cb, void *arg);
 
 int
-dmu_send(objset_t *tosnap, objset_t *fromsnap, boolean_t fromorigin,
+dmu_send(const char *tosnap, const char *fromsnap,
          int outfd, struct vnode *fd, offset_t *off);
-int dmu_send_estimate(objset_t *tosnap, objset_t *fromsnap, boolean_t orign,
-    uint64_t *sizep);
 
 typedef struct dmu_recv_cookie {
 	/*
@@ -858,6 +858,9 @@ int dmu_recv_end(dmu_recv_cookie_t *drc);
 
 int dmu_diff(objset_t *tosnap, objset_t *fromsnap, struct vnode *vp,
     offset_t *off);
+
+int dmu_diff(const char *tosnap_name, const char *fromsnap_name,
+    struct vnode *vp, offset_t *offp);
 
 /* CRC64 table */
 #define	ZFS_CRC64_POLY	0xC96C5795D7870F42ULL	/* ECMA-182, reflected form */

@@ -1019,10 +1019,10 @@ sa_setup(objset_t *os, uint64_t sa_obj, sa_attr_reg_t *reg_attrs, int count,
 	sa_attr_type_t *tb;
 	int error;
 
-	mutex_enter(&os->os_lock);
+	mutex_enter(&os->os_user_ptr_lock);
 	if (os->os_sa) {
 		mutex_enter(&os->os_sa->sa_lock);
-		mutex_exit(&os->os_lock);
+		mutex_exit(&os->os_user_ptr_lock);
 		tb = os->os_sa->sa_user_table;
 		mutex_exit(&os->os_sa->sa_lock);
 		*user_table = tb;
@@ -1035,7 +1035,7 @@ sa_setup(objset_t *os, uint64_t sa_obj, sa_attr_reg_t *reg_attrs, int count,
 
 	os->os_sa = sa;
 	mutex_enter(&sa->sa_lock);
-	mutex_exit(&os->os_lock);
+	mutex_exit(&os->os_user_ptr_lock);
 	avl_create(&sa->sa_layout_num_tree, layout_num_compare,
 	    sizeof (sa_lot_t), offsetof(sa_lot_t, lot_num_node));
 	avl_create(&sa->sa_layout_hash_tree, layout_hash_compare,
@@ -1291,8 +1291,11 @@ sa_build_index(sa_handle_t *hdl, sa_buf_type_t buftype)
 	sa_hdr_phys_t *sa_hdr_phys;
 	dmu_buf_impl_t *db = SA_GET_DB(hdl, buftype);
 	dmu_object_type_t bonustype = SA_BONUSTYPE_FROM_DB(db);
-	sa_os_t *sa = hdl->sa_os->os_sa;
+	sa_os_t *sa;
 	sa_idx_tab_t *idx_tab;
+
+    if (!hdl) panic("ZFS: hdl is NULL");
+    sa = hdl->sa_os->os_sa;
 
     if (!sa) return 0;
 
@@ -1305,7 +1308,16 @@ sa_build_index(sa_handle_t *hdl, sa_buf_type_t buftype)
 	/* only check if not old znode */
 	if (IS_SA_BONUSTYPE(bonustype) && sa_hdr_phys->sa_magic != SA_MAGIC &&
 	    sa_hdr_phys->sa_magic != 0) {
-		VERIFY(BSWAP_32(sa_hdr_phys->sa_magic) == SA_MAGIC);
+
+		//VERIFY(BSWAP_32(sa_hdr_phys->sa_magic) == SA_MAGIC);
+		if (BSWAP_32(sa_hdr_phys->sa_magic) != SA_MAGIC) {
+            printf("sa_magic is incorrect (%08x != %08x). hdl %p buftype %02x\n",
+                   sa_hdr_phys->sa_magic, SA_MAGIC,
+                   hdl, buftype);
+
+            return 0;
+        }
+
 		sa_byteswap(hdl, buftype);
 	}
 

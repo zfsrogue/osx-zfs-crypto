@@ -123,6 +123,14 @@ zfs_prop_init(void)
 		{ NULL }
 	};
 
+    static zprop_index_t acl_mode_table[] = {
+        { "discard",    ZFS_ACL_DISCARD },
+        { "discard",    ZFS_ACL_GROUPMASK }, /* bkwrd compatability */
+        { "passthrough", ZFS_ACL_PASSTHROUGH },
+        { "mask", ZFS_ACL_MASKED },
+        { NULL }
+    };
+
 	static zprop_index_t case_table[] = {
 		{ "sensitive",		ZFS_CASE_SENSITIVE },
 		{ "insensitive",	ZFS_CASE_INSENSITIVE },
@@ -253,6 +261,9 @@ zfs_prop_init(void)
 	    ZFS_ACL_RESTRICTED, PROP_INHERIT, ZFS_TYPE_FILESYSTEM,
 	    "discard | noallow | restricted | passthrough | passthrough-x",
 	    "ACLINHERIT", acl_inherit_table);
+    zprop_register_index(ZFS_PROP_ACLMODE, "aclmode",
+        ZFS_ACL_DISCARD, PROP_INHERIT, ZFS_TYPE_FILESYSTEM,
+        "discard | mask | passthrough", "ACLMODE", acl_mode_table);
 	zprop_register_index(ZFS_PROP_COPIES, "copies", 1, PROP_INHERIT,
 	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME,
 	    "1 | 2 | 3", "COPIES", copies_table);
@@ -450,6 +461,13 @@ zfs_prop_init(void)
                         PROP_TYPE_NUMBER, 0, NULL, PROP_READONLY,
                         ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME,
                         "<date>", "REKEYDATE", B_FALSE, B_TRUE, NULL);
+#ifdef __APPLE__
+    /* Apple specific properties */
+	zprop_register_index(ZFS_PROP_APPLE_BROWSE, "com.apple.browse", 1,PROP_INHERIT,
+        ZFS_TYPE_FILESYSTEM, "on | off", "COM.APPLE.BROWSE", boolean_table);
+	zprop_register_index(ZFS_PROP_APPLE_IGNOREOWNER, "com.apple.ignoreowner", 0, PROP_INHERIT,
+	    ZFS_TYPE_FILESYSTEM, "on | off", "COM.APPLE.IGNOREOWNER", boolean_table);
+#endif
 }
 
 boolean_t

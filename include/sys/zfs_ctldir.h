@@ -47,16 +47,9 @@
         (zfs_has_ctldir(zdp) && \
         ((zdp)->z_zfsvfs->z_show_ctldir))
 
-typedef struct {
-	char			*se_name;
-	char			*se_path;
-	struct vnode		*se_inode;
-	taskqid_t		se_taskqid;
-	avl_node_t		se_node;
-} zfs_snapentry_t;
 
 /* zfsctl generic functions */
-extern int snapentry_compare(const void *a, const void *b);
+//extern int snapentry_compare(const void *a, const void *b);
 extern boolean_t zfsctl_is_node(struct vnode *ip);
 extern boolean_t zfsctl_is_snapdir(struct vnode *ip);
 extern void zfsctl_inode_inactive(struct vnode *ip);
@@ -74,7 +67,7 @@ extern int zfsctl_root_lookup ( struct vnode *dvp,char *nm,struct vnode **vpp,
                                 pathname_t *pnp, int flags,struct vnode *rdir,
                                 cred_t *cr, caller_context_t *ct,
                                 int *direntflags, pathname_t *realpnp);
-extern vnode_t *zfsctl_root(znode_t *zp);
+extern struct vnode *zfsctl_root(znode_t *zp);
 
 /* zfsctl '.zfs/snapshot' functions */
 #if 0
@@ -109,11 +102,20 @@ extern void zfsctl_fini(void);
  * However, they should be as large as possible to avoid conflicts
  * with the objects which are assigned monotonically by the dmu.
  */
+
+#ifdef __LINUX__
+//#ifdef __APPLE__
 #define	ZFSCTL_INO_ROOT		0x0000FFFFFFFFFFFFULL
 #define	ZFSCTL_INO_SHARES	0x0000FFFFFFFFFFFEULL
 #define	ZFSCTL_INO_SNAPDIR	0x0000FFFFFFFFFFFDULL
 #define	ZFSCTL_INO_SNAPDIRS	0x0000FFFFFFFFFFFCULL
 
 #define	ZFSCTL_EXPIRE_SNAPSHOT	300
+#else
+
+#define	ZFSCTL_INO_ROOT		0x3
+#define	ZFSCTL_INO_SNAPDIR	0x4
+#define	ZFSCTL_INO_SHARES	0x5
+#endif
 
 #endif	/* _ZFS_CTLDIR_H */
