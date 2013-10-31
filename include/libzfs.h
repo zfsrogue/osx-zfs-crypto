@@ -38,6 +38,7 @@
 #include <sys/fs/zfs.h>
 #include <sys/avl.h>
 #include <ucred.h>
+#include "sys/zcrypt.h"
 
 #ifdef	__cplusplus
 extern "C" {
@@ -429,8 +430,8 @@ typedef enum {
     ZFS_CRYPTO_KEY_CHANGE
 } zfs_crypto_zckey_t;
 
-extern int zfs_crypto_zckey(libzfs_handle_t *, zfs_crypto_zckey_t,
-                            nvlist_t *, struct zfs_cmd *, zfs_type_t);
+extern int zfs_crypto_zckey(libzfs_handle_t *, zfs_crypto_zckey_t, nvlist_t *,
+                      char *, char *, zfs_ioc_crypto_t *, zfs_type_t);
 extern int zfs_crypto_rename_check(zfs_handle_t *, struct zfs_cmd *);
 extern boolean_t zfs_valid_keysource(char *);
 extern boolean_t zfs_valid_set_keysource_change(zfs_handle_t *, char *, char *);

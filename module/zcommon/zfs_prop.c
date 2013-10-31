@@ -446,9 +446,6 @@ zfs_prop_init(void)
 	/*
 	 * Property to be removed once libbe is integrated
 	 */
-	zprop_register_hidden(ZFS_PROP_PRIVATE, "priv_prop",
-	    PROP_TYPE_NUMBER, PROP_READONLY, ZFS_TYPE_FILESYSTEM,
-	    "PRIV_PROP");
 	zprop_register_hidden(ZFS_PROP_SALT, "salt", PROP_TYPE_NUMBER,
 	    PROP_READONLY, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME, "SALT");
 

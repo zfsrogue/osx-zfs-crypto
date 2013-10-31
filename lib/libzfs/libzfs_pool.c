@@ -1186,7 +1186,8 @@ zpool_create(libzfs_handle_t *hdl, const char *pool, nvlist_t *nvroot,
 	}
 
     /* zfs_crypto_create may update zc_fsprops */
-    if (zfs_crypto_zckey(hdl, ZFS_CRYPTO_PCREATE, zc_fsprops, &zc,
+    if (zfs_crypto_zckey(hdl, ZFS_CRYPTO_PCREATE, zc_fsprops, zc.zc_name,
+                         zc.zc_value, &zc.zc_crypto,
                          ZFS_TYPE_FILESYSTEM) != 0)
         goto create_failed;
 

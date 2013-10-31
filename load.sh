@@ -7,7 +7,7 @@ fi
 tail -f /var/log/system.log &
 
 rsync -ar module/zfs/zfs.kext/ /tmp/zfs.kext/
-rsync -ar ../spl/module/spl/spl.kext/ /tmp/spl.kext/
+rsync -ar ../osx-spl-crypto/module/spl/spl.kext/ /tmp/spl.kext/
 
 chown -R root:wheel /tmp/spl.kext /tmp/zfs.kext
 

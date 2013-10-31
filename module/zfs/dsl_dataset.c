@@ -779,7 +779,7 @@ dsl_dataset_create_sync(dsl_dir_t *pdd, const char *lastname,
 	ddobj = dsl_dir_create_sync(dp, pdd, lastname, tx);
 	VERIFY0(dsl_dir_hold_obj(dp, ddobj, lastname, FTAG, &dd));
 
-	dsobj = dsl_dataset_create_sync_dd(dd, origin,
+	dsobj = dsl_dataset_create_sync_dd(dd, origin, dcc,
 	    flags & ~DS_CREATE_FLAG_NODIRTY, tx);
 
 	dsl_deleg_set_create_perms(dd, tx, cr);
@@ -889,199 +889,22 @@ dsl_dataset_get_spa(dsl_dataset_t *ds)
 void
 dsl_dataset_dirty(dsl_dataset_t *ds, dmu_tx_t *tx)
 {
-	int err;
-	dsl_sync_task_group_t *dstg;
-	objset_t *os;
-	dsl_dir_t *dd;
-	uint64_t obj, dsobj;
-	struct dsl_ds_destroyarg dsda = { 0 };
-	dsl_dataset_t *dummy_ds;
-    spa_t *spa;
+    dsl_pool_t *dp;
 
-	dsda.ds = ds;
-    dsobj = ds->ds_object;
-    spa = dsl_dataset_get_spa(ds);
+    if (ds == NULL) /* this is the meta-objset */
+        return;
 
-	if (dsl_dataset_is_snapshot(ds)) {
-		/* Destroying a snapshot is simpler */
-		dsl_dataset_make_exclusive(ds, tag);
+    ASSERT(ds->ds_objset != NULL);
 
-		dsda.defer = defer;
-		err = dsl_sync_task_do(ds->ds_dir->dd_pool,
-		    dsl_dataset_destroy_check, dsl_dataset_destroy_sync,
-		    &dsda, tag, 0);
-		ASSERT3P(dsda.rm_origin, ==, NULL);
-		goto out;
-	} else if (defer) {
-		err = EINVAL;
-		goto out;
-	}
+    if (ds->ds_phys->ds_next_snap_obj != 0)
+        panic("dirtying snapshot!");
 
-	dd = ds->ds_dir;
-	dummy_ds = kmem_zalloc(sizeof (dsl_dataset_t), KM_SLEEP);
-	dummy_ds->ds_dir = dd;
-	dummy_ds->ds_object = ds->ds_object;
+    dp = ds->ds_dir->dd_pool;
 
-	if (!spa_feature_is_enabled(dsl_dataset_get_spa(ds),
-	    &spa_feature_table[SPA_FEATURE_ASYNC_DESTROY])) {
-		/*
-		 * Check for errors and mark this ds as inconsistent, in
-		 * case we crash while freeing the objects.
-		 */
-		err = dsl_sync_task_do(dd->dd_pool,
-		    dsl_dataset_destroy_begin_check,
-		    dsl_dataset_destroy_begin_sync, ds, NULL, 0);
-		if (err)
-			goto out_free;
-
-		err = dmu_objset_from_ds(ds, &os);
-		if (err)
-			goto out_free;
-
-		/*
-		 * Remove all objects while in the open context so that
-		 * there is less work to do in the syncing context.
-		 */
-		for (obj = 0; err == 0; err = dmu_object_next(os, &obj, FALSE,
-		    ds->ds_phys->ds_prev_snap_txg)) {
-			/*
-			 * Ignore errors, if there is not enough disk space
-			 * we will deal with it in dsl_dataset_destroy_sync().
-			 */
-			(void) dmu_free_object(os, obj);
-		}
-		if (err != ESRCH)
-			goto out_free;
-
-		/*
-		 * Sync out all in-flight IO.
-		 */
-		txg_wait_synced(dd->dd_pool, 0);
-
-        /*
-         * If we managed to free all the objects in open
-         * context, the user space accounting should be zero.
-         */
-        if (ds->ds_phys->ds_bp.blk_fill == 0 &&
-            dmu_objset_userused_enabled(os)  &&
-            !ds->ds_objset->os_destroy_nokey) {
-            ASSERTV(uint64_t count);
-            ASSERT(zap_count(os, DMU_USERUSED_OBJECT, &count) != 0 ||
-                   count == 0);
-            ASSERT(zap_count(os, DMU_GROUPUSED_OBJECT, &count) != 0 ||
-                   count == 0);
-        }
+    if (txg_list_add(&dp->dp_dirty_datasets, ds, tx->tx_txg)) {
+        /* up the hold count until we can be written out */
+        dmu_buf_add_ref(ds->ds_dbuf, ds);
     }
-
-	rw_enter(&dd->dd_pool->dp_config_rwlock, RW_READER);
-	err = dsl_dir_open_obj(dd->dd_pool, dd->dd_object, NULL, FTAG, &dd);
-	rw_exit(&dd->dd_pool->dp_config_rwlock);
-
-	if (err)
-		goto out_free;
-
-	/*
-	 * Blow away the dsl_dir + head dataset.
-	 */
-	dsl_dataset_make_exclusive(ds, tag);
-	/*
-	 * If we're removing a clone, we might also need to remove its
-	 * origin.
-	 */
-	do {
-		dsda.need_prep = B_FALSE;
-		if (dsl_dir_is_clone(dd)) {
-			err = dsl_dataset_origin_rm_prep(&dsda, tag);
-			if (err) {
-				dsl_dir_close(dd, FTAG);
-				goto out_free;
-			}
-		}
-
-		dstg = dsl_sync_task_group_create(ds->ds_dir->dd_pool);
-		dsl_sync_task_create(dstg, dsl_dataset_destroy_check,
-		    dsl_dataset_destroy_sync, &dsda, tag, 0);
-		dsl_sync_task_create(dstg, dsl_dir_destroy_check,
-		    dsl_dir_destroy_sync, dummy_ds, FTAG, 0);
-		err = dsl_sync_task_group_wait(dstg);
-		dsl_sync_task_group_destroy(dstg);
-
-		/*
-		 * We could be racing against 'zfs release' or 'zfs destroy -d'
-		 * on the origin snap, in which case we can get EBUSY if we
-		 * needed to destroy the origin snap but were not ready to
-		 * do so.
-		 */
-		if (dsda.need_prep) {
-			ASSERT(err == EBUSY);
-			ASSERT(dsl_dir_is_clone(dd));
-			ASSERT(dsda.rm_origin == NULL);
-		}
-	} while (dsda.need_prep);
-
-	if (dsda.rm_origin != NULL)
-		dsl_dataset_disown(dsda.rm_origin, tag);
-
-	/* if it is successful, dsl_dir_destroy_sync will close the dd */
-	if (err) {
-		dsl_dir_close(dd, FTAG);
-	} else {
-
-		/* Remove the key from the keystore for encrypted datasets. */
-		err = zcrypt_keystore_remove(spa,
-                                     dsobj);
-	}
-out_free:
-	kmem_free(dummy_ds, sizeof (dsl_dataset_t));
-out:
-	dsl_dataset_disown(ds, tag);
-	return (err);
-}
-
-blkptr_t *
-dsl_dataset_get_blkptr(dsl_dataset_t *ds)
-{
-	return (&ds->ds_phys->ds_bp);
-}
-
-void
-dsl_dataset_set_blkptr(dsl_dataset_t *ds, blkptr_t *bp, dmu_tx_t *tx)
-{
-	ASSERT(dmu_tx_is_syncing(tx));
-	/* If it's the meta-objset, set dp_meta_rootbp */
-	if (ds == NULL) {
-		tx->tx_pool->dp_meta_rootbp = *bp;
-	} else {
-		dmu_buf_will_dirty(ds->ds_dbuf, tx);
-		ds->ds_phys->ds_bp = *bp;
-	}
-}
-
-spa_t *
-dsl_dataset_get_spa(dsl_dataset_t *ds)
-{
-	return (ds->ds_dir->dd_pool->dp_spa);
-}
-
-void
-dsl_dataset_dirty(dsl_dataset_t *ds, dmu_tx_t *tx)
-{
-	dsl_pool_t *dp;
-
-	if (ds == NULL) /* this is the meta-objset */
-		return;
-
-	ASSERT(ds->ds_objset != NULL);
-
-	if (ds->ds_phys->ds_next_snap_obj != 0)
-		panic("dirtying snapshot!");
-
-	dp = ds->ds_dir->dd_pool;
-
-	if (txg_list_add(&dp->dp_dirty_datasets, ds, tx->tx_txg)) {
-		/* up the hold count until we can be written out */
-		dmu_buf_add_ref(ds->ds_dbuf, ds);
-	}
 }
 
 boolean_t
@@ -1551,51 +1374,40 @@ dsl_dataset_snapshot_tmp_sync(void *arg, dmu_tx_t *tx)
 	dsl_dataset_rele(ds, FTAG);
 }
 
+
 int
 dsl_dataset_snapshot_tmp(const char *fsname, const char *snapname,
     minor_t cleanup_minor, const char *htag)
 {
-	dsl_dataset_snapshot_tmp_arg_t ddsta;
-	int error;
-	spa_t *spa;
-	boolean_t needsuspend;
-	void *cookie;
+        dsl_dataset_snapshot_tmp_arg_t ddsta;
+        int error;
+        spa_t *spa;
+        boolean_t needsuspend;
+        void *cookie;
 
-		if ((os->os_crypt != ZIO_CRYPT_OFF) &&
-		    spa_feature_is_enabled(dp->dp_spa,
-			      &spa_feature_table[SPA_FEATURE_ENCRYPTION])) {
-		  spa_feature_decr(dp->dp_spa,
-				   &spa_feature_table[SPA_FEATURE_ENCRYPTION],
-				   tx);
-		}
-		
-		if (!spa_feature_is_enabled(dp->dp_spa, async_destroy)) {
-			err = old_synchronous_dataset_destroy(ds, tx);
-		} else {
-			/*
-			 * Move the bptree into the pool's list of trees to
-			 * clean up and update space accounting information.
-			 */
-			uint64_t used, comp, uncomp;
+        ddsta.ddsta_fsname = fsname;
+        ddsta.ddsta_snapname = snapname;
+        ddsta.ddsta_cleanup_minor = cleanup_minor;
+        ddsta.ddsta_htag = htag;
 
-	error = spa_open(fsname, &spa, FTAG);
-	if (error != 0)
-		return (error);
-	needsuspend = (spa_version(spa) < SPA_VERSION_FAST_SNAP);
-	spa_close(spa, FTAG);
+        error = spa_open(fsname, &spa, FTAG);
+        if (error != 0)
+                return (error);
+        needsuspend = (spa_version(spa) < SPA_VERSION_FAST_SNAP);
+        spa_close(spa, FTAG);
 
-	if (needsuspend) {
-		error = zil_suspend(fsname, &cookie);
-		if (error != 0)
-			return (error);
-	}
+        if (needsuspend) {
+                error = zil_suspend(fsname, &cookie);
+                if (error != 0)
+                        return (error);
+        }
 
-	error = dsl_sync_task(fsname, dsl_dataset_snapshot_tmp_check,
-	    dsl_dataset_snapshot_tmp_sync, &ddsta, 3);
+        error = dsl_sync_task(fsname, dsl_dataset_snapshot_tmp_check,
+            dsl_dataset_snapshot_tmp_sync, &ddsta, 3);
 
-	if (needsuspend)
-		zil_resume(cookie);
-	return (error);
+        if (needsuspend)
+                zil_resume(cookie);
+        return (error);
 }
 
 
@@ -2012,7 +1824,7 @@ dsl_dataset_rollback_sync(void *arg, dmu_tx_t *tx)
 	VERIFY0(dsl_dataset_hold(dp, fsname, FTAG, &ds));
 
 	cloneobj = dsl_dataset_create_sync(ds->ds_dir, "%rollback",
-	    ds->ds_prev, DS_CREATE_FLAG_NODIRTY, kcred, tx);
+           ds->ds_prev, NULL /*dcc*/, DS_CREATE_FLAG_NODIRTY, kcred, tx);
 
 	VERIFY0(dsl_dataset_hold_obj(dp, cloneobj, FTAG, &clone));
 

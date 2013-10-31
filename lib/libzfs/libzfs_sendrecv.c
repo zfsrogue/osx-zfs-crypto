@@ -2947,7 +2947,8 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 
     // This will most likely fail for recv VOLUMES.
     if (!flags->dryrun &&
-        zfs_crypto_zckey(hdl, ZFS_CRYPTO_RECV, NULL, &zc,
+        zfs_crypto_zckey(hdl, ZFS_CRYPTO_RECV, NULL, zc.zc_name,
+                         zc.zc_value, &zc.zc_crypto,
                          ZFS_TYPE_FILESYSTEM) != 0) {
         return zfs_error(hdl, EZFS_KEYERR, errbuf);
     }

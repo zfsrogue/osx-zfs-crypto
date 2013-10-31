@@ -502,7 +502,7 @@ spa_prop_validate(spa_t *spa, nvlist_t *props)
 				} else if ((error =
 				    dsl_prop_get_int_ds(dmu_objset_ds(os),
 				    zfs_prop_to_name(ZFS_PROP_COMPRESSION),
-				    &compress, NULL)) == 0 &&
+				    &compress)) == 0 &&
 				    !BOOTFS_COMPRESS_VALID(compress))
 					error = ENOTSUP;
 

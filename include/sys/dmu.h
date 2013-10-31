@@ -276,13 +276,11 @@ void dmu_objset_rele(objset_t *os, void *tag);
 void dmu_objset_disown(objset_t *os, void *tag);
 int dmu_objset_open_ds(struct dsl_dataset *ds, objset_t **osp);
 
-int dmu_objset_evict_dbufs(objset_t *os);
+void dmu_objset_evict_dbufs(objset_t *os);
 int dmu_objset_create(const char *name, dmu_objset_type_t type, uint64_t flags,
                       struct dsl_crypto_ctx *crypto_ctx,
     void (*func)(objset_t *os, void *arg, cred_t *cr, dmu_tx_t *tx), void *arg);
-int dmu_objset_clone(const char *name, struct dsl_dataset *clone_origin,
-    struct dsl_crypto_ctx *crypto_ctx, uint64_t flags);
-#endif
+
 int dmu_objset_destroy(const char *name, boolean_t defer);
 int dmu_objset_snapshot(char *fsname, char *snapname, char *tag,
     struct nvlist *props, boolean_t recursive, boolean_t temporary, int fd);
@@ -290,7 +288,9 @@ int dmu_objset_snapshot(char *fsname, char *snapname, char *tag,
     // boolean_t recursive);
 #define  dmu_objset_rename(old, new, recursive)       dsl_dataset_rename((old), (new), (recursive))
 
-int dmu_objset_clone(const char *name, const char *origin);
+int dmu_objset_clone(const char *name, const char *origin,
+     struct dsl_crypto_ctx *crypto_ctx);
+    //int dmu_objset_clone(const char *name, const char *origin);
 int dsl_destroy_snapshots_nvl(struct nvlist *snaps, boolean_t defer,
     struct nvlist *errlist);
 int dmu_objset_snapshot_one(const char *fsname, const char *snapname);
@@ -831,33 +831,7 @@ int
 dmu_send(const char *tosnap, const char *fromsnap,
          int outfd, struct vnode *fd, offset_t *off);
 
-typedef struct dmu_recv_cookie {
-	/*
-	 * This structure is opaque!
-	 *
-	 * If logical and real are different, we are recving the stream
-	 * into the "real" temporary clone, and then switching it with
-	 * the "logical" target.
-	 */
-	struct dsl_dataset *drc_logical_ds;
-	struct dsl_dataset *drc_real_ds;
-	struct drr_begin *drc_drrb;
-	char *drc_tosnap;
-	char *drc_top_ds;
-	boolean_t drc_newfs;
-	boolean_t drc_force;
-	struct avl_tree *drc_guid_to_ds_map;
-} dmu_recv_cookie_t;
 
-  int dmu_recv_begin(char *tofs, char *tosnap, char *top_ds, struct drr_begin *drrb,
-		     boolean_t force, objset_t *origin, dmu_recv_cookie_t *drc,
-		     struct dsl_crypto_ctx *dcc);
-int dmu_recv_stream(dmu_recv_cookie_t *drc, struct vnode *fd, offset_t *voffp,
-    int cleanup_fd, uint64_t *action_handlep);
-int dmu_recv_end(dmu_recv_cookie_t *drc);
-
-int dmu_diff(objset_t *tosnap, objset_t *fromsnap, struct vnode *vp,
-    offset_t *off);
 
 int dmu_diff(const char *tosnap_name, const char *fromsnap_name,
     struct vnode *vp, offset_t *offp);

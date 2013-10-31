@@ -788,16 +788,6 @@ dmu_objset_create_impl(spa_t *spa, dsl_dataset_t *ds, blkptr_t *bp,
 	return (os);
 }
 
-struct oscarg {
-	void (*userfunc)(objset_t *os, void *arg, cred_t *cr, dmu_tx_t *tx);
-	void *userarg;
-	dsl_dataset_t *clone_origin;
-	const char *lastname;
-	dmu_objset_type_t type;
-	uint64_t flags;
-	cred_t *cr;
-    dsl_crypto_ctx_t *crypto_ctx;
-};
 typedef struct dmu_objset_create_arg {
 	const char *doca_name;
 	cred_t *doca_cred;
@@ -806,7 +796,9 @@ typedef struct dmu_objset_create_arg {
 	void *doca_userarg;
 	dmu_objset_type_t doca_type;
 	uint64_t doca_flags;
+    struct dsl_crypto_ctx *doca_crypto_ctx;
 } dmu_objset_create_arg_t;
+
 
 /*ARGSUSED*/
 static int
@@ -834,11 +826,14 @@ dmu_objset_create_check(void *arg, dmu_tx_t *tx)
      * Check we have the required crypto algorithms available
      * via kcf since this is our last chance to fail the dataset creation.
      */
-    if (oa->crypto_ctx != NULL &&
-        !zcrypt_mech_available(oa->crypto_ctx->dcc_crypt)) {
+    printf("create_check\n");
+    if (doca->doca_crypto_ctx != NULL &&
+        !zcrypt_mech_available(doca->doca_crypto_ctx->dcc_crypt)) {
+        printf("create_check bad cipher\n");
         return (ENOTSUP);
     }
 
+    printf("create_check OK\n");
 	return (0);
 }
 
@@ -856,13 +851,17 @@ dmu_objset_create_sync(void *arg, dmu_tx_t *tx)
 
 	VERIFY0(dsl_dir_hold(dp, doca->doca_name, FTAG, &pdd, &tail));
 
-	obj = dsl_dataset_create_sync(pdd, tail, NULL, doca->doca_flags,
+	obj = dsl_dataset_create_sync(pdd, tail, NULL, doca->doca_crypto_ctx, doca->doca_flags,
 	    doca->doca_cred, tx);
+
+    printf("create_sync obj %p\n", obj);
 
 	VERIFY0(dsl_dataset_hold_obj(pdd->dd_pool, obj, FTAG, &ds));
 	bp = dsl_dataset_get_blkptr(ds);
 	os = dmu_objset_create_impl(pdd->dd_pool->dp_spa,
-	    ds, bp, doca->doca_type, tx);
+	    ds, bp, doca->doca_type, doca->doca_crypto_ctx, tx);
+
+    printf("create_sync os %p\n", os);
 
 	if (doca->doca_userfunc != NULL) {
 		doca->doca_userfunc(os, doca->doca_userarg,
@@ -879,124 +878,73 @@ dmu_objset_create(const char *name, dmu_objset_type_t type, uint64_t flags,
                   struct dsl_crypto_ctx *crypto_ctx,
     void (*func)(objset_t *os, void *arg, cred_t *cr, dmu_tx_t *tx), void *arg)
 {
-	dmu_objset_create_arg_t doca;
+    dmu_objset_create_arg_t doca;
 
-	ASSERT(strchr(name, '@') == NULL);
-	err = dsl_dir_open(name, FTAG, &pdd, &tail);
+    doca.doca_name = name;
+    doca.doca_cred = CRED();
+    doca.doca_flags = flags;
+    doca.doca_userfunc = func;
+    doca.doca_userarg = arg;
+    doca.doca_crypto_ctx = crypto_ctx;
+    doca.doca_type = type;
 
-	if (err)
-		return (err);
-	if (tail == NULL) {
-		dsl_dir_close(pdd, FTAG);
-		return (EEXIST);
-	}
-
-	oa.userfunc = func;
-	oa.userarg = arg;
-	oa.lastname = tail;
-	oa.type = type;
-	oa.flags = flags;
-	oa.cr = CRED();
-    oa.crypto_ctx = crypto_ctx;
-
-	err = dsl_sync_task_do(pdd->dd_pool, dmu_objset_create_check,
-	    dmu_objset_create_sync, pdd, &oa, 5);
-
-	dsl_dir_close(pdd, FTAG);
-	return (err);
+    return (dsl_sync_task(name,
+                          dmu_objset_create_check, dmu_objset_create_sync, &doca, 5));
 }
 
-int
-dmu_objset_clone(const char *name, dsl_dataset_t *clone_origin,
-                 struct dsl_crypto_ctx *crypto_ctx, uint64_t flags)
-	doca.doca_name = name;
-	doca.doca_cred = CRED();
-	doca.doca_flags = flags;
-	doca.doca_userfunc = func;
-	doca.doca_userarg = arg;
-	doca.doca_type = type;
-
-	return (dsl_sync_task(name,
-	    dmu_objset_create_check, dmu_objset_create_sync, &doca, 5));
-}
 
 typedef struct dmu_objset_clone_arg {
 	const char *doca_clone;
 	const char *doca_origin;
 	cred_t *doca_cred;
+    struct dsl_crypto_ctx *doca_crypto_ctx;
 } dmu_objset_clone_arg_t;
 
 /*ARGSUSED*/
 static int
 dmu_objset_clone_check(void *arg, dmu_tx_t *tx)
 {
-	dmu_objset_clone_arg_t *doca = arg;
-	dsl_dir_t *pdd;
-	const char *tail;
-	int error;
-	dsl_dataset_t *origin;
-	dsl_pool_t *dp = dmu_tx_pool(tx);
+    dmu_objset_clone_arg_t *doca = arg;
+    dsl_dir_t *pdd;
+    const char *tail;
+    int error;
+    dsl_dataset_t *origin;
+    dsl_pool_t *dp = dmu_tx_pool(tx);
 
-	if (strchr(doca->doca_clone, '@') != NULL)
-		return (EINVAL);
+    if (strchr(doca->doca_clone, '@') != NULL)
+        return (EINVAL);
 
-	error = dsl_dir_hold(dp, doca->doca_clone, FTAG, &pdd, &tail);
-	if (error != 0)
-		return (error);
-	if (tail == NULL) {
-		dsl_dir_rele(pdd, FTAG);
-		return (EEXIST);
-	}
+    error = dsl_dir_hold(dp, doca->doca_clone, FTAG, &pdd, &tail);
+    if (error != 0)
+        return (error);
+    if (tail == NULL) {
+        dsl_dir_rele(pdd, FTAG);
+        return (EEXIST);
+    }
+    /* You can't clone across pools. */
+    if (pdd->dd_pool != dp) {
+        dsl_dir_rele(pdd, FTAG);
+        return (EXDEV);
+    }
+    dsl_dir_rele(pdd, FTAG);
 
-	oa.lastname = tail;
-	oa.clone_origin = clone_origin;
-	oa.flags = flags;
-	oa.cr = CRED();
-    oa.crypto_ctx = crypto_ctx;
+    error = dsl_dataset_hold(dp, doca->doca_origin, FTAG, &origin);
+    if (error != 0)
+        return (error);
+    /* You can't clone across pools. */
+    if (origin->ds_dir->dd_pool != dp) {
+        dsl_dataset_rele(origin, FTAG);
+        return (EXDEV);
+    }
 
-	err = dsl_sync_task_do(pdd->dd_pool, dmu_objset_create_check,
-	    dmu_objset_create_sync, pdd, &oa, 5);
-	dsl_dir_close(pdd, FTAG);
-	return (err);
-}
+    /* You can only clone snapshots, not the head datasets. */
+    if (!dsl_dataset_is_snapshot(origin)) {
+        dsl_dataset_rele(origin, FTAG);
+        return (EINVAL);
+    }
+    dsl_dataset_rele(origin, FTAG);
 
-int
-dmu_objset_destroy(const char *name, boolean_t defer)
-{
-	dsl_dataset_t *ds;
-	int error;
-
-	error = dsl_dataset_own(name, B_TRUE, FTAG, &ds);
-	if (error == 0) {
-		error = dsl_dataset_destroy(ds, FTAG, defer);
-		/* dsl_dataset_destroy() closes the ds. */
-
-	/* You can't clone across pools. */
-	if (pdd->dd_pool != dp) {
-		dsl_dir_rele(pdd, FTAG);
-		return (EXDEV);
-
-	}
-	dsl_dir_rele(pdd, FTAG);
-
-	error = dsl_dataset_hold(dp, doca->doca_origin, FTAG, &origin);
-	if (error != 0)
-		return (error);
-
-	/* You can't clone across pools. */
-	if (origin->ds_dir->dd_pool != dp) {
-		dsl_dataset_rele(origin, FTAG);
-		return (EXDEV);
-	}
-
-	/* You can only clone snapshots, not the head datasets. */
-	if (!dsl_dataset_is_snapshot(origin)) {
-		dsl_dataset_rele(origin, FTAG);
-		return (EINVAL);
-	}
-	dsl_dataset_rele(origin, FTAG);
-
-	return (0);
+    return (0);
 }
 
 static void
@@ -1013,7 +961,7 @@ dmu_objset_clone_sync(void *arg, dmu_tx_t *tx)
 	VERIFY0(dsl_dir_hold(dp, doca->doca_clone, FTAG, &pdd, &tail));
 	VERIFY0(dsl_dataset_hold(dp, doca->doca_origin, FTAG, &origin));
 
-	obj = dsl_dataset_create_sync(pdd, tail, origin, 0,
+	obj = dsl_dataset_create_sync(pdd, tail, origin, doca->doca_crypto_ctx, 0,
 	    doca->doca_cred, tx);
 
 	VERIFY0(dsl_dataset_hold_obj(pdd->dd_pool, obj, FTAG, &ds));
@@ -1026,18 +974,20 @@ dmu_objset_clone_sync(void *arg, dmu_tx_t *tx)
 }
 
 int
-dmu_objset_clone(const char *clone, const char *origin)
+dmu_objset_clone(const char *clone, const char *origin,
+                 struct dsl_crypto_ctx *crypto_ctx)
 {
-	dmu_objset_clone_arg_t doca;
+        dmu_objset_clone_arg_t doca;
 
-	doca.doca_clone = clone;
-	doca.doca_origin = origin;
+        doca.doca_clone = clone;
+        doca.doca_origin = origin;
+        doca.doca_crypto_ctx = crypto_ctx;
 #ifdef _KERNEL
-	doca.doca_cred = vfs_context_current();
+        doca.doca_cred = vfs_context_current();
 #endif
 
-	return (dsl_sync_task(clone,
-	    dmu_objset_clone_check, dmu_objset_clone_sync, &doca, 5));
+        return (dsl_sync_task(clone,
+            dmu_objset_clone_check, dmu_objset_clone_sync, &doca, 5));
 }
 
 int
