@@ -809,9 +809,13 @@ dmu_objset_create_check(void *arg, dmu_tx_t *tx)
 	dsl_dir_t *pdd;
 	const char *tail;
 	int error;
+    zfs_crypt_key_status_t keystatus = 0;
 
 	if (strchr(doca->doca_name, '@') != NULL)
 		return (EINVAL);
+
+    dsl_dataset_keystatus_byname(dp,doca->doca_name, &keystatus);
+    if (keystatus == ZFS_CRYPT_KEY_UNAVAILABLE) return (ENOKEY);
 
 	error = dsl_dir_hold(dp, doca->doca_name, FTAG, &pdd, &tail);
 	if (error != 0)
@@ -826,14 +830,10 @@ dmu_objset_create_check(void *arg, dmu_tx_t *tx)
      * Check we have the required crypto algorithms available
      * via kcf since this is our last chance to fail the dataset creation.
      */
-    printf("create_check\n");
     if (doca->doca_crypto_ctx != NULL &&
         !zcrypt_mech_available(doca->doca_crypto_ctx->dcc_crypt)) {
-        printf("create_check bad cipher\n");
         return (ENOTSUP);
     }
-
-    printf("create_check OK\n");
 	return (0);
 }
 

@@ -1645,26 +1645,17 @@ zfs_ioc_pool_freeze(zfs_cmd_t *zc)
 }
 
 static int
-zfs_feature_encryption(spa_t *spa, uint64_t dsobj,
-                       const char *dsname, void *arg)
+zfs_feature_encryption(dsl_pool_t *dp, dsl_dataset_t *ds, void *arg)
 {
-	dsl_dataset_t *ds;
 	uint64_t crypt;
 	int error;
 	dmu_tx_t *tx;
 	objset_t *os;
-    dsl_pool_t *dp;
-
-    if ((error = dsl_pool_hold(dsname, FTAG, &dp)) != 0)
-        return error;
-
-	if ((error = dsl_dataset_hold(dp, dsname, FTAG, &ds)) != 0)
-		return (error);
-
-	rw_enter(&ds->ds_dir->dd_pool->dp_config_rwlock, RW_READER);
+    char dsname[MAXNAMELEN];
+	rrw_enter(&ds->ds_dir->dd_pool->dp_config_rwlock, RW_READER, FTAG);
 	error = dsl_prop_get_ds(ds, zfs_prop_to_name(ZFS_PROP_ENCRYPTION),
                             8, 1, &crypt, NULL/*, DSL_PROP_GET_EFFECTIVE*/);
-	rw_exit(&ds->ds_dir->dd_pool->dp_config_rwlock);
+	rrw_exit(&ds->ds_dir->dd_pool->dp_config_rwlock, FTAG);
 
 	if ((error == 0) &&
         (crypt != ZIO_CRYPT_OFF)) {
@@ -1676,25 +1667,22 @@ zfs_feature_encryption(spa_t *spa, uint64_t dsobj,
             error = dmu_tx_assign(tx, TXG_WAIT);
             if (!error) {
 
-                if (!spa_feature_is_enabled(spa,
+                if (!spa_feature_is_enabled(dp->dp_spa,
                                             &spa_feature_table[SPA_FEATURE_ENCRYPTION])) {
-                    spa_feature_enable(spa,
+                    spa_feature_enable(dp->dp_spa,
                                        &spa_feature_table[SPA_FEATURE_ENCRYPTION],
                                        tx);
                 }
-                spa_feature_incr(spa,
+                spa_feature_incr(dp->dp_spa,
                                  &spa_feature_table[SPA_FEATURE_ENCRYPTION],
                                  tx);
                 dmu_tx_commit(tx);
 
+                dsl_dataset_name(ds, dsname);
                 printf("feature@encryption active on '%s'\n", dsname);
             }
         } // os
     }
-
-
-    dsl_dataset_rele(ds, FTAG);
-    dsl_pool_rele(dp, FTAG);
 
 	return (0);
 }
@@ -1725,7 +1713,7 @@ zfs_ioc_pool_upgrade(zfs_cmd_t *zc)
         error = dsl_pool_hold(zc->zc_name, FTAG, &dp);
         if (!error) {
             VERIFY(0 == dmu_objset_find_dp(dp,
-                                           NULL,
+                                           0,
                                            zfs_feature_encryption,
                                            NULL,
                                          DS_FIND_CHILDREN|DS_FIND_SNAPSHOTS));
@@ -3353,16 +3341,12 @@ zfs_ioc_create(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
     if (cbfunc == NULL)
         return (EINVAL);
 
-    printf("looking up crypto_ctx\n");
-
-	if (nvlist_lookup_byte_array(innvl, "crypto_ctx", (char *)&zic,&size) != 0)
+	if (nvlist_lookup_byte_array(innvl, "crypto_ctx", (uchar_t **)&zic,
+                                 &size) != 0)
 		return (EINVAL);
-
-    printf("Pulled out crypto_ctx size %d == %d\n", size, sizeof(zic));
 
     if ((size != sizeof(*zic)) ||
         (error = zfs_get_crypto_ctx(fsname, zic, &dcc)) != 0) {
-    printf("ctx failed %d\n", error);
         return (error);
     }
 
@@ -3402,7 +3386,6 @@ zfs_ioc_create(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
                             NV_UNIQUE_NAME, KM_SLEEP) == 0);
         error = zfs_fill_zplprops(fsname, nvprops,
                                   zct.zct_zplprops, &is_insensitive);
-        printf("fill props %d\n", error);
         if (error != 0) {
             nvlist_free(zct.zct_zplprops);
             return (error);
@@ -3412,7 +3395,6 @@ zfs_ioc_create(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
     error = dmu_objset_create(fsname, type,
              is_insensitive ? DS_FLAG_CI_DATASET : 0, &dcc, cbfunc, &zct);
     nvlist_free(zct.zct_zplprops);
-    printf("dmu_create %d\n", error);
 
     /*
      * It would be nice to do this atomically.
@@ -3423,7 +3405,6 @@ zfs_ioc_create(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
         if (error != 0)
             (void) dsl_destroy_head(fsname);
     }
-    printf("ioc_create return %d\n", error);
     return (error);
 }
 
@@ -3458,7 +3439,8 @@ zfs_ioc_clone(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
 	if (dataset_namecheck(origin_name, NULL, NULL) != 0)
 		return (EINVAL);
 
-	if (nvlist_lookup_byte_array(innvl, "crypto_ctx", &zic, &size) != 0)
+	if (nvlist_lookup_byte_array(innvl, "crypto_ctx", (uchar_t **)&zic,
+                                 &size) != 0)
 		return (EINVAL);
 
     if ((size != sizeof(*zic)) ||
@@ -4330,6 +4312,7 @@ zfs_ioc_recv(zfs_cmd_t *zc)
 	offset_t off;
 	nvlist_t *props = NULL; /* sent properties */
 	nvlist_t *origprops = NULL; /* existing properties */
+    nvlist_t *cmdprops = NULL; /* props specified by 'zfs recv' */
     dsl_crypto_ctx_t dcc = { 0 };
 	char *origin = NULL;
 	char *tosnap;
@@ -4360,6 +4343,11 @@ zfs_ioc_recv(zfs_cmd_t *zc)
 		nvlist_free(props);
 		return (EBADF);
 	}
+
+    if ((zc->zc_nvlist_conf != NULL) &&
+        (error = get_nvlist(zc->zc_nvlist_conf, zc->zc_nvlist_conf_size,
+                            zc->zc_iflags, &cmdprops)) != 0)
+        goto out;
 
 	VERIFY(nvlist_alloc(&errors, NV_UNIQUE_NAME, KM_SLEEP) == 0);
 
@@ -4406,6 +4394,8 @@ zfs_ioc_recv(zfs_cmd_t *zc)
 			if (zfs_check_clearable(tofs, origprops, &errlist) != 0)
 				(void) nvlist_merge(errors, errlist, 0);
 			nvlist_free(errlist);
+
+            props_handle_encryption(props, origprops, cmdprops, errors);
 
 			if (clear_received_props(tofs, origprops,
 			    first_recvd_props ? NULL : props) != 0)

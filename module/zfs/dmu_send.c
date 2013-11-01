@@ -480,14 +480,14 @@ dmu_send_impl(void *tag, dsl_pool_t *dp, dsl_dataset_t *ds,
 			    drr->drr_u.drr_begin.drr_versioninfo,
 			    DMU_BACKUP_FEATURE_SA_SPILL);
 		}
-        rw_enter(&ds->ds_dir->dd_pool->dp_config_rwlock, RW_READER);
+        rrw_enter(&ds->ds_dir->dd_pool->dp_config_rwlock, RW_READER, FTAG);
         if (dsl_prop_get_ds(ds,
                             zfs_prop_to_name(ZFS_PROP_ENCRYPTION), 8, 1, &crypt, NULL
                             /*,DSL_PROP_GET_EFFECTIVE*/) != 0) {
-            rw_exit(&ds->ds_dir->dd_pool->dp_config_rwlock);
+            rrw_exit(&ds->ds_dir->dd_pool->dp_config_rwlock, FTAG);
             return (EINVAL);
         }
-        rw_exit(&ds->ds_dir->dd_pool->dp_config_rwlock);
+        rrw_exit(&ds->ds_dir->dd_pool->dp_config_rwlock, FTAG);
         if (crypt != ZIO_CRYPT_OFF) {
             featureflags |= DMU_BACKUP_FEATURE_ENCRYPT;
         }
@@ -778,6 +778,56 @@ recv_begin_check_existing_impl(dmu_recv_begin_arg_t *drba, dsl_dataset_t *ds,
 
 }
 
+static boolean_t
+dmu_recv_verify_features(dsl_dataset_t *ds, struct drr_begin *drrb)
+{
+	int featureflags;
+    uint64_t crypt;
+
+	featureflags = DMU_GET_FEATUREFLAGS(drrb->drr_versioninfo);
+
+#if 0
+	/* Verify pool version supports SA if SA_SPILL feature set */
+	return ((featureflags & DMU_BACKUP_FEATURE_SA_SPILL) &&
+	    (spa_version(dsl_dataset_get_spa(ds)) < SPA_VERSION_SA));
+#endif
+
+        /*
+         * Currently all these checks only apply to DMU_OST_ZFS
+         * because they are all to do with the SA spill blocks
+         * and also how that is used by encrypted filesystems.
+         * If ZVOLs ever start using SA spill blocks for anything the
+         * first check at least might need to apply to them too.
+         */
+        if (drrb->drr_type != DMU_OST_ZFS) {
+                return (B_TRUE);
+        }
+        /* Verify pool version supports SA if SA_SPILL feature set */
+        if ((featureflags & DMU_BACKUP_FEATURE_SA_SPILL) &&
+            spa_version(dsl_dataset_get_spa(ds)) < SPA_VERSION_SA) {
+                return (B_FALSE);
+        }
+
+        /*
+         * Verify stream came from an encrypted dataset if encryption is on.
+         */
+        rrw_enter(&ds->ds_dir->dd_pool->dp_config_rwlock, RW_READER, FTAG);
+        VERIFY(0 == dsl_prop_get_ds(ds, zfs_prop_to_name(ZFS_PROP_ENCRYPTION),
+                                    8, 1, &crypt, NULL
+                                    /*, DSL_PROP_GET_EFFECTIVE*/)); //FIXME
+        rrw_exit(&ds->ds_dir->dd_pool->dp_config_rwlock, FTAG);
+        if ((featureflags & DMU_BACKUP_FEATURE_ENCRYPT) &&
+            !spa_feature_is_enabled(dsl_dataset_get_spa(ds),
+                                    &spa_feature_table[SPA_FEATURE_ENCRYPTION])) {
+                return (B_FALSE);
+        } else if (crypt != ZIO_CRYPT_OFF) {
+                return (featureflags & DMU_BACKUP_FEATURE_ENCRYPT);
+        }
+
+        return (B_TRUE);
+}
+
+
 static int
 dmu_recv_begin_check(void *arg, dmu_tx_t *tx)
 {
@@ -808,6 +858,11 @@ dmu_recv_begin_check(void *arg, dmu_tx_t *tx)
 
 	error = dsl_dataset_hold(dp, tofs, FTAG, &ds);
 	if (error == 0) {
+        if (!dmu_recv_verify_features(ds, drrb)) {
+            dsl_dataset_rele(ds, dmu_recv_tag);
+            return (ENOTSUP);
+        }
+
 		/* target fs already exists; recv into temp clone */
 
 		/* Can't recv a clone into an existing fs */
@@ -835,6 +890,11 @@ dmu_recv_begin_check(void *arg, dmu_tx_t *tx)
 		error = dsl_dataset_hold(dp, buf, FTAG, &ds);
 		if (error != 0)
 			return (error);
+
+        if (!dmu_recv_verify_features(ds, drrb)) {
+            dsl_dataset_rele(ds, FTAG);
+            return (ENOTSUP);
+        }
 
 		if (drba->drba_origin != NULL) {
 			dsl_dataset_t *origin;
@@ -926,54 +986,6 @@ dmu_recv_begin_sync(void *arg, dmu_tx_t *tx)
 	spa_history_log_internal_ds(newds, "receive", tx, "");
 }
 
-static boolean_t
-dmu_recv_verify_features(dsl_dataset_t *ds, struct drr_begin *drrb)
-{
-	int featureflags;
-    uint64_t crypt;
-
-	featureflags = DMU_GET_FEATUREFLAGS(drrb->drr_versioninfo);
-
-#if 0
-	/* Verify pool version supports SA if SA_SPILL feature set */
-	return ((featureflags & DMU_BACKUP_FEATURE_SA_SPILL) &&
-	    (spa_version(dsl_dataset_get_spa(ds)) < SPA_VERSION_SA));
-#endif
-
-        /*
-         * Currently all these checks only apply to DMU_OST_ZFS
-         * because they are all to do with the SA spill blocks
-         * and also how that is used by encrypted filesystems.
-         * If ZVOLs ever start using SA spill blocks for anything the
-         * first check at least might need to apply to them too.
-         */
-        if (drrb->drr_type != DMU_OST_ZFS) {
-                return (B_TRUE);
-        }
-        /* Verify pool version supports SA if SA_SPILL feature set */
-        if ((featureflags & DMU_BACKUP_FEATURE_SA_SPILL) &&
-            spa_version(dsl_dataset_get_spa(ds)) < SPA_VERSION_SA) {
-                return (B_FALSE);
-        }
-
-        /*
-         * Verify stream came from an encrypted dataset if encryption is on.
-         */
-        rw_enter(&ds->ds_dir->dd_pool->dp_config_rwlock, RW_READER);
-        VERIFY(0 == dsl_prop_get_ds(ds, zfs_prop_to_name(ZFS_PROP_ENCRYPTION),
-                                    8, 1, &crypt, NULL
-                                    /*, DSL_PROP_GET_EFFECTIVE*/)); //FIXME
-        rw_exit(&ds->ds_dir->dd_pool->dp_config_rwlock);
-        if ((featureflags & DMU_BACKUP_FEATURE_ENCRYPT) &&
-            !spa_feature_is_enabled(dsl_dataset_get_spa(ds),
-                                    &spa_feature_table[SPA_FEATURE_ENCRYPTION])) {
-                return (B_FALSE);
-        } else if (crypt != ZIO_CRYPT_OFF) {
-                return (featureflags & DMU_BACKUP_FEATURE_ENCRYPT);
-        }
-
-        return (B_TRUE);
-}
 
 /*
  * NB: callers *MUST* call dmu_recv_stream() if dmu_recv_begin()

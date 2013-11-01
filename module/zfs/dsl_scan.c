@@ -363,7 +363,6 @@ dsl_read(zio_t *pio, spa_t *spa, const blkptr_t *bpp, arc_buf_t *pbuf,
     arc_done_func_t *done, void *private, int priority, int zio_flags,
     uint32_t *arc_flags, const zbookmark_t *zb)
 {
-    printf("dsl_read called?\n");
 	return (arc_read(pio, spa, bpp, done, private,
 	    priority, zio_flags, arc_flags, zb));
 }
