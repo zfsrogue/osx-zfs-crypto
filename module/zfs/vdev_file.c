@@ -20,7 +20,7 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2012 by Delphix. All rights reserved.
+ * Copyright (c) 2013 by Delphix. All rights reserved.
  */
 
 #include <sys/zfs_context.h>
@@ -71,7 +71,7 @@ vdev_file_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	 */
 	if (vd->vdev_path == NULL || vd->vdev_path[0] != '/') {
 		vd->vdev_stat.vs_aux = VDEV_AUX_BAD_LABEL;
-		return (EINVAL);
+		return (SET_ERROR(EINVAL));
 	}
 
 	/*
@@ -140,9 +140,8 @@ vdev_file_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	if (!vnode_isreg(vp)) {
         vd->vdev_stat.vs_aux = VDEV_AUX_OPEN_FAILED;
         VN_RELE(vf->vf_vnode);
-        return (ENODEV);
-    }
-
+		return (SET_ERROR(ENODEV));
+	}
 #endif
 
 #if _KERNEL
@@ -161,17 +160,15 @@ skip_open:
 		return (error);
 	}
 
+#ifdef _KERNEL
 	*max_psize = *psize = vattr.va_size;
-
-
-    if (1) {
-        *ashift = SPA_MINBLOCKSHIFT;
-    } else {
-        printf("Pretending to be 4k\n");
-        *ashift = 12;
-        vd->vdev_ashift = 12;
-    }
-
+#else
+    /* userland's vn_open() will get the device size for us, so we can
+     * just look it up - there is argument for a userland VOP_GETATTR to make
+     * this function cleaner. */
+	*max_psize = *psize = vp->v_size;
+#endif
+    *ashift = SPA_MINBLOCKSHIFT;
     VN_RELE(vf->vf_vnode);
 
 	return (0);
@@ -209,7 +206,7 @@ vdev_file_io_start(zio_t *zio)
     if (zio->io_type == ZIO_TYPE_IOCTL) {
 
         if (!vdev_readable(vd)) {
-            zio->io_error = ENXIO;
+            zio->io_error = SET_ERROR(ENXIO);
             return (ZIO_PIPELINE_CONTINUE);
         }
 
@@ -219,9 +216,9 @@ vdev_file_io_start(zio_t *zio)
             zio->io_error = VOP_FSYNC(vf->vf_vnode, FSYNC | FDSYNC,
                                       kcred, NULL);
             vnode_put(vf->vf_vnode);
-                        break;
+            break;
         default:
-            zio->io_error = ENOTSUP;
+            zio->io_error = SET_ERROR(ENOTSUP);
         }
 
         return (ZIO_PIPELINE_CONTINUE);
@@ -234,9 +231,8 @@ vdev_file_io_start(zio_t *zio)
                             0, RLIM64_INFINITY, kcred, &resid);
     vnode_put(vf->vf_vnode);
 
-
     if (resid != 0 && zio->io_error == 0)
-        zio->io_error = ENOSPC;
+        zio->io_error = SET_ERROR(ENOSPC);
 
     zio_interrupt(zio);
 

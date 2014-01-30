@@ -21,9 +21,10 @@
 
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright 2011 Nexenta Systems, Inc. All rights reserved.
  * Copyright (c) 2012 by Delphix. All rights reserved.
  * Copyright (c) 2012, Joyent, Inc. All rights reserved.
+ * Copyright (c) 2013 Steven Hartland. All rights reserved.
+ * Copyright 2013 Nexenta Systems, Inc. All rights reserved.
  */
 
 #ifndef	_LIBZFS_H
@@ -57,6 +58,11 @@ extern "C" {
  */
 #define	DISK_ROOT		"/dev"
 #define	UDISK_ROOT		"/dev/disk"
+
+/*
+ * Default wait time for a device name to be created.
+ */
+#define	DISK_LABEL_WAIT		(30 * 1000)  /* 30 seconds */
 
 #define	DEFAULT_IMPORT_PATH_SIZE	7
 extern char *zpool_default_import_path[DEFAULT_IMPORT_PATH_SIZE];
@@ -204,11 +210,6 @@ extern const char *libzfs_error_description(libzfs_handle_t *);
 /*
  * Mount table functions
  */
-typedef struct mnttab_node {
-	struct mnttab mtn_mt;
-	avl_node_t mtn_node;
-} mnttab_node_t;
-
 extern void libzfs_mnttab_init(libzfs_handle_t *);
 extern void libzfs_mnttab_fini(libzfs_handle_t *);
 extern void libzfs_mnttab_cache(libzfs_handle_t *, boolean_t);
@@ -217,8 +218,6 @@ extern int libzfs_mnttab_find(libzfs_handle_t *, const char *,
 extern void libzfs_mnttab_add(libzfs_handle_t *, const char *,
     const char *, const char *);
 extern void libzfs_mnttab_remove(libzfs_handle_t *, const char *);
-extern mnttab_node_t *libzfs_mnttab_first(libzfs_handle_t *);
-extern mnttab_node_t *libzfs_mnttab_next(libzfs_handle_t *, mnttab_node_t *);
 
 /*
  * Basic handle functions
@@ -289,6 +288,8 @@ extern int zpool_label_disk(libzfs_handle_t *, zpool_handle_t *, char *);
 extern int zpool_set_prop(zpool_handle_t *, const char *, const char *);
 extern int zpool_get_prop(zpool_handle_t *, zpool_prop_t, char *,
     size_t proplen, zprop_source_t *);
+extern int zpool_get_prop_literal(zpool_handle_t *, zpool_prop_t, char *,
+    size_t proplen, zprop_source_t *, boolean_t literal);
 extern uint64_t zpool_get_prop_int(zpool_handle_t *, zpool_prop_t,
     zprop_source_t *);
 
@@ -505,7 +506,8 @@ typedef struct zprop_list {
 	boolean_t	pl_fixed;
 } zprop_list_t;
 
-extern int zfs_expand_proplist(zfs_handle_t *, zprop_list_t **, boolean_t);
+extern int zfs_expand_proplist(zfs_handle_t *, zprop_list_t **, boolean_t,
+    boolean_t);
 extern void zfs_prune_proplist(zfs_handle_t *, uint8_t *);
 
 #define	ZFS_MOUNTPOINT_NONE	"none"
@@ -642,7 +644,8 @@ extern int zfs_send(zfs_handle_t *, const char *, const char *,
 
 extern int zfs_promote(zfs_handle_t *);
 extern int zfs_hold(zfs_handle_t *, const char *, const char *,
-    boolean_t, boolean_t, int);
+    boolean_t, int);
+extern int zfs_hold_nvl(zfs_handle_t *, int, nvlist_t *);
 extern int zfs_release(zfs_handle_t *, const char *, const char *, boolean_t);
 extern int zfs_get_holds(zfs_handle_t *, nvlist_t **);
 extern uint64_t zvol_volsize_to_reservation(uint64_t, nvlist_t *);

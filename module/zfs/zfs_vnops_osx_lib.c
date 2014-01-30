@@ -39,7 +39,7 @@ typedef uint64_t vfs_feature_t;
 	( VNODE_ATTR_va_mode |                      \
 	  VNODE_ATTR_va_uid |                       \
 	  VNODE_ATTR_va_gid |                       \
-      /* VNODE_ATTR_va_fsid |*/                 \
+      VNODE_ATTR_va_fsid |                      \
 	  VNODE_ATTR_va_fileid |                    \
 	  VNODE_ATTR_va_nlink |                     \
 	  VNODE_ATTR_va_data_size |                 \
@@ -50,9 +50,15 @@ typedef uint64_t vfs_feature_t;
 	  VNODE_ATTR_va_access_time |               \
 	  VNODE_ATTR_va_modify_time |               \
 	  VNODE_ATTR_va_change_time |               \
+	  VNODE_ATTR_va_backup_time |               \
 	  VNODE_ATTR_va_flags |                     \
 	  VNODE_ATTR_va_parentid |                  \
 	  VNODE_ATTR_va_iosize |                    \
+      VNODE_ATTR_va_filerev |                   \
+      VNODE_ATTR_va_type    |                   \
+      VNODE_ATTR_va_encoding |                  \
+	  VNODE_ATTR_va_uuuid |                       \
+	  VNODE_ATTR_va_guuid |                       \
       0)
 
 /* For part 1 of zfs_getattr() */
@@ -125,6 +131,9 @@ zfs_getattr_znode_locked(vattr_t *vap, znode_t *zp, cred_t *cr)
 		vap->va_parentid = val;
 
 	vap->va_iosize = zp->z_blksz ? zp->z_blksz : zfsvfs->z_max_blksz;
+    VATTR_SET_SUPPORTED(vap, va_iosize);
+    printf("stat blksize set to %d\n", vap->va_iosize);
+
 	vap->va_supported |= ZFS_SUPPORTED_VATTRS;
 
 	if (VATTR_IS_ACTIVE(vap, va_nchildren) && vnode_isdir(ZTOV(zp)))
@@ -168,6 +177,7 @@ zfs_getattr_znode_unlocked(struct vnode *vp, vattr_t *vap)
 	 * On Mac OS X we always export the root directory id as 2
 	 */
 	vap->va_fileid = (zp->z_id == zfsvfs->z_root) ? 2 : zp->z_id;
+	//vap->va_fileid = (zp->z_id == zfsvfs->z_root) ? 2 : zp->z_vid;
 	vap->va_nlink = zp->z_links;
 	vap->va_data_size = zp->z_size;
 	vap->va_total_size = zp->z_size;
@@ -180,7 +190,7 @@ zfs_getattr_znode_unlocked(struct vnode *vp, vattr_t *vap)
 		vap->va_backup_time.tv_sec = 0;
 		vap->va_backup_time.tv_nsec = 0;
 		VATTR_SET_SUPPORTED(vap, va_backup_time);
-	}
+    }
 	vap->va_flags = zfs_getbsdflags(zp);
 	/*
 	 * On Mac OS X we always export the root directory id as 2
@@ -199,12 +209,24 @@ zfs_getattr_znode_unlocked(struct vnode *vp, vattr_t *vap)
     }
 
 	vap->va_iosize = zp->z_blksz ? zp->z_blksz : zfsvfs->z_max_blksz;
-
-	vap->va_supported |= ZFS_SUPPORTED_VATTRS;
+	//vap->va_iosize = 512;
+    VATTR_SET_SUPPORTED(vap, va_iosize);
 
 	/* Don't include '.' and '..' in the number of entries */
 	if (VATTR_IS_ACTIVE(vap, va_nchildren) && vnode_isdir(vp)) {
 		VATTR_RETURN(vap, va_nchildren, vap->va_nlink - 2);
+    }
+
+	/*
+	 * va_dirlinkcount is the count of directory hard links. When a file
+	 * system does not support ATTR_DIR_LINKCOUNT, xnu will default to 1.
+	 * Since we claim to support ATTR_DIR_LINKCOUNT both as valid and as
+	 * native, we'll just return 1. We set 1 for this value in dirattrpack
+	 * as well. If in the future ZFS actually supports directory hard links,
+	 * we can return a real value.
+	 */
+	if (VATTR_IS_ACTIVE(vap, va_dirlinkcount) && vnode_isdir(vp)) {
+		VATTR_RETURN(vap, va_dirlinkcount, 1);
     }
 
 	if (VATTR_IS_ACTIVE(vap, va_acl)) {
@@ -224,6 +246,9 @@ zfs_getattr_znode_unlocked(struct vnode *vp, vattr_t *vap)
 		}
 
 #endif
+      //VATTR_SET_SUPPORTED(vap, va_acl);
+        VATTR_RETURN(vap, va_uuuid, kauth_null_guid);
+        VATTR_RETURN(vap, va_guuid, kauth_null_guid);
 
         dprintf("Calling getacl\n");
         if ((error = zfs_getacl(zp, &vap->va_acl, B_FALSE, NULL))) {
@@ -249,13 +274,54 @@ zfs_getattr_znode_unlocked(struct vnode *vp, vattr_t *vap)
             VNODE_ATTR_va_total_alloc;
 	}
 
-	if (VATTR_IS_ACTIVE(vap, va_name) && !vnode_isvroot(vp)) {
-		if (zap_value_search(zfsvfs->z_os, parent, zp->z_id,
-                             ZFS_DIRENT_OBJ(-1ULL), vap->va_name) == 0)
-			VATTR_SET_SUPPORTED(vap, va_name);
+	if (VATTR_IS_ACTIVE(vap, va_name)) {
+        vap->va_name[0] = 0;
+
+        if (!vnode_isvroot(vp)) {
+            if (zap_value_search(zfsvfs->z_os, parent, zp->z_id,
+                                 ZFS_DIRENT_OBJ(-1ULL), vap->va_name) == 0)
+                VATTR_SET_SUPPORTED(vap, va_name);
+        } else {
+            /*
+             * The vroot objects must return a unique name for Finder to
+             * be able to distringuish between mounts. For this reason
+             * we simply return the fullname, from the statfs mountedfrom
+             */
+            strlcpy(vap->va_name,
+                    vfs_statfs(vnode_mount(vp))->f_mntfromname,
+                    MAXPATHLEN);
+            VATTR_SET_SUPPORTED(vap, va_name);
+        }
 	}
 
-	vap->va_iosize = zp->z_blksz;
+	if (VATTR_IS_ACTIVE(vap, va_filerev)) {
+        VATTR_RETURN(vap, va_filerev, 0);
+    }
+	if (VATTR_IS_ACTIVE(vap, va_linkid)) {
+        VATTR_RETURN(vap, va_linkid, vap->va_fileid);
+    }
+	if (VATTR_IS_ACTIVE(vap, va_fsid)) {
+        VATTR_RETURN(vap, va_fsid, vfs_statfs(zfsvfs->z_vfs)->f_fsid.val[0]);
+    }
+	if (VATTR_IS_ACTIVE(vap, va_type)) {
+        VATTR_RETURN(vap, va_type, vnode_vtype(ZTOV(zp)));
+    }
+	if (VATTR_IS_ACTIVE(vap, va_encoding)) {
+        VATTR_RETURN(vap, va_encoding, kTextEncodingMacUnicode);
+    }
+#ifdef VNODE_ATTR_va_addedtime
+	if (VATTR_IS_ACTIVE(vap, va_addedtime)) {
+        VATTR_RETURN(vap, va_addedtime, vap->va_ctime);
+    }
+#endif
+	if (VATTR_IS_ACTIVE(vap, va_uuuid)) {
+        kauth_cred_uid2guid(zp->z_uid, &vap->va_uuuid);
+    }
+	if (VATTR_IS_ACTIVE(vap, va_guuid)) {
+        kauth_cred_uid2guid(zp->z_gid, &vap->va_guuid);
+    }
+
+	vap->va_supported |= ZFS_SUPPORTED_VATTRS;
 
 	ZFS_EXIT(zfsvfs);
 	return (error);

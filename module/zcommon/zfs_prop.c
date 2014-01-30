@@ -20,7 +20,8 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2011 by Delphix. All rights reserved.
+ * Copyright (c) 2012 by Delphix. All rights reserved.
+ * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
  */
 
 /* Portions Copyright 2010 Robert Milkowski */
@@ -110,6 +111,14 @@ zfs_prop_init(void)
 	static zprop_index_t snapdev_table[] = {
 		{ "hidden",	ZFS_SNAPDEV_HIDDEN },
 		{ "visible",	ZFS_SNAPDEV_VISIBLE },
+		{ NULL }
+	};
+
+	static zprop_index_t acltype_table[] = {
+		{ "off",	ZFS_ACLTYPE_OFF },
+		{ "disabled",	ZFS_ACLTYPE_OFF },
+		{ "noacl",	ZFS_ACLTYPE_OFF },
+		{ "posixacl",	ZFS_ACLTYPE_POSIXACL },
 		{ NULL }
 	};
 
@@ -257,6 +266,11 @@ zfs_prop_init(void)
 	zprop_register_index(ZFS_PROP_SNAPDEV, "snapdev", ZFS_SNAPDEV_HIDDEN,
 	    PROP_INHERIT, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME,
 	    "hidden | visible", "SNAPDEV", snapdev_table);
+#ifdef LINUX
+	zprop_register_index(ZFS_PROP_ACLTYPE, "acltype", ZFS_ACLTYPE_OFF,
+	    PROP_INHERIT, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_SNAPSHOT,
+	    "noacl | posixacl", "ACLTYPE", acltype_table);
+#endif
 	zprop_register_index(ZFS_PROP_ACLINHERIT, "aclinherit",
 	    ZFS_ACL_RESTRICTED, PROP_INHERIT, ZFS_TYPE_FILESYSTEM,
 	    "discard | noallow | restricted | passthrough | passthrough-x",
@@ -315,7 +329,11 @@ zfs_prop_init(void)
 
 	/* readonly index (boolean) properties */
 	zprop_register_index(ZFS_PROP_MOUNTED, "mounted", 0, PROP_READONLY,
+#ifdef __APPLE__
+	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_SNAPSHOT, "yes | no", "MOUNTED", boolean_table);
+#else
 	    ZFS_TYPE_FILESYSTEM, "yes | no", "MOUNTED", boolean_table);
+#endif
 	zprop_register_index(ZFS_PROP_DEFER_DESTROY, "defer_destroy", 0,
 	    PROP_READONLY, ZFS_TYPE_SNAPSHOT, "yes | no", "DEFER_DESTROY",
 	    boolean_table);
@@ -350,7 +368,11 @@ zfs_prop_init(void)
 	zprop_register_string(ZFS_PROP_CLONES, "clones", NULL, PROP_READONLY,
 	    ZFS_TYPE_SNAPSHOT, "<dataset>[,...]", "CLONES");
 	zprop_register_string(ZFS_PROP_MOUNTPOINT, "mountpoint", "/",
+#ifdef __APPLE__
+	    PROP_INHERIT, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_SNAPSHOT, "<path> | legacy | none",
+#else
 	    PROP_INHERIT, ZFS_TYPE_FILESYSTEM, "<path> | legacy | none",
+#endif
 	    "MOUNTPOINT");
 	zprop_register_string(ZFS_PROP_SHARENFS, "sharenfs", "off",
 	    PROP_INHERIT, ZFS_TYPE_FILESYSTEM, "on | off | share(1M) options",
@@ -368,6 +390,20 @@ zfs_prop_init(void)
 	    "raw | hex | passphrase,"
 	    "prompt | file://<path> | NO pkcs11: | https://<path>",
 	    "KEYSOURCE");
+#ifdef LINUX
+	zprop_register_string(ZFS_PROP_SELINUX_CONTEXT, "context",
+	    "none", PROP_DEFAULT, ZFS_TYPE_DATASET, "<selinux context>",
+	    "CONTEXT");
+	zprop_register_string(ZFS_PROP_SELINUX_FSCONTEXT, "fscontext",
+	    "none", PROP_DEFAULT, ZFS_TYPE_DATASET, "<selinux fscontext>",
+	    "FSCONTEXT");
+	zprop_register_string(ZFS_PROP_SELINUX_DEFCONTEXT, "defcontext",
+	    "none", PROP_DEFAULT, ZFS_TYPE_DATASET, "<selinux defcontext>",
+	    "DEFCONTEXT");
+	zprop_register_string(ZFS_PROP_SELINUX_ROOTCONTEXT, "rootcontext",
+	    "none", PROP_DEFAULT, ZFS_TYPE_DATASET, "<selinux rootcontext>",
+	    "ROOTCONTEXT");
+#endif
 
 	/* readonly number properties */
 	zprop_register_number(ZFS_PROP_USED, "used", 0, PROP_READONLY,
@@ -401,6 +437,10 @@ zfs_prop_init(void)
 	    ZFS_TYPE_SNAPSHOT, "<count>", "USERREFS");
 	zprop_register_number(ZFS_PROP_WRITTEN, "written", 0, PROP_READONLY,
 	    ZFS_TYPE_DATASET, "<size>", "WRITTEN");
+	zprop_register_number(ZFS_PROP_LOGICALUSED, "logicalused", 0,
+	    PROP_READONLY, ZFS_TYPE_DATASET, "<size>", "LUSED");
+	zprop_register_number(ZFS_PROP_LOGICALREFERENCED, "logicalreferenced",
+	    0, PROP_READONLY, ZFS_TYPE_DATASET, "<size>", "LREFER");
 
 	/* default number properties */
 	zprop_register_number(ZFS_PROP_QUOTA, "quota", 0, PROP_DEFAULT,
@@ -442,6 +482,8 @@ zfs_prop_init(void)
 	    PROP_READONLY, ZFS_TYPE_DATASET, "UNIQUE");
 	zprop_register_hidden(ZFS_PROP_OBJSETID, "objsetid", PROP_TYPE_NUMBER,
 	    PROP_READONLY, ZFS_TYPE_DATASET, "OBJSETID");
+	zprop_register_hidden(ZFS_PROP_INCONSISTENT, "inconsistent",
+	    PROP_TYPE_NUMBER, PROP_READONLY, ZFS_TYPE_DATASET, "INCONSISTENT");
 
 	/*
 	 * Property to be removed once libbe is integrated
@@ -702,6 +744,7 @@ spl_module_exit(zcommon_fini);
 MODULE_DESCRIPTION("Generic ZFS support");
 MODULE_AUTHOR(ZFS_META_AUTHOR);
 MODULE_LICENSE(ZFS_META_LICENSE);
+MODULE_VERSION(ZFS_META_VERSION "-" ZFS_META_RELEASE);
 
 /* zfs dataset property functions */
 EXPORT_SYMBOL(zfs_userquota_prop_prefixes);

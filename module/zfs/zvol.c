@@ -580,6 +580,8 @@ zvol_create_minor(const char *name)
     // The iokit framework may call Open, so we can not be locked.
     zvolCreateNewDevice(zv);
 
+
+
 	return (0);
 }
 
@@ -642,6 +644,36 @@ zvol_remove_minor(const char *name)
 	return (rc);
 }
 
+/*
+ * Rename a block device minor mode for the specified volume.
+ */
+static void
+__zvol_rename_minor(zvol_state_t *zv, const char *newname)
+{
+#ifdef LINUX
+    int readonly = get_disk_ro(zv->zv_disk);
+#endif
+
+    ASSERT(MUTEX_HELD(&zvol_state_lock));
+
+    strlcpy(zv->zv_name, newname, sizeof (zv->zv_name));
+
+#ifdef LINUX
+    /*
+     * The block device's read-only state is briefly changed causing
+     * a KOBJ_CHANGE uevent to be issued.  This ensures udev detects
+     * the name change and fixes the symlinks.  This does not change
+     * ZVOL_RDONLY in zv->zv_flags so the actual read-only state never
+     * changes.  This would normally be done using kobject_uevent() but
+     * that is a GPL-only symbol which is why we need this workaround.
+     */
+    set_disk_ro(zv->zv_disk, !readonly);
+    set_disk_ro(zv->zv_disk, readonly);
+#endif
+}
+
+
+
 int
 zvol_first_open(zvol_state_t *zv)
 {
@@ -682,13 +714,16 @@ zvol_first_open(zvol_state_t *zv)
 		zv->zv_flags |= ZVOL_RDONLY;
 	else
 		zv->zv_flags &= ~ZVOL_RDONLY;
-    dprintf("first_open %d\n", error);
+
 	return (error);
 }
 
 void
 zvol_last_close(zvol_state_t *zv)
 {
+
+    dprintf("zvol_last_close\n");
+
 	zil_close(zv->zv_zilog);
 	zv->zv_zilog = NULL;
 
@@ -795,6 +830,51 @@ zvol_remove_minors(const char *name)
 
 	mutex_exit(&zfsdev_state_lock);
 }
+
+/*
+ * Rename minors for specified dataset including children and snapshots.
+ */
+void
+zvol_rename_minors(const char *oldname, const char *newname)
+{
+    zvol_state_t *zv, *zv_next;
+    int oldnamelen, newnamelen;
+    char *name;
+
+#ifdef LINUX
+    if (zvol_inhibit_dev)
+        return;
+#endif
+
+    oldnamelen = strlen(oldname);
+    newnamelen = strlen(newname);
+    name = kmem_alloc(MAXNAMELEN, KM_PUSHPAGE);
+
+	mutex_enter(&zfsdev_state_lock);
+
+#ifdef LINUX
+    for (zv = list_head(&zvol_state_list); zv != NULL; zv = zv_next) {
+        zv_next = list_next(&zvol_state_list, zv);
+
+        if (strcmp(zv->zv_name, oldname) == 0) {
+            __zvol_rename_minor(zv, newname);
+        } else if (strncmp(zv->zv_name, oldname, oldnamelen) == 0 &&
+                   (zv->zv_name[oldnamelen] == '/' ||
+                    zv->zv_name[oldnamelen] == '@')) {
+            snprintf(name, MAXNAMELEN, "%s%c%s", newname,
+                     zv->zv_name[oldnamelen],
+                     zv->zv_name + oldnamelen + 1);
+            __zvol_rename_minor(zv, name);
+        }
+    }
+#endif
+
+    mutex_exit(&zfsdev_state_lock);
+
+    kmem_free(name, MAXNAMELEN);
+}
+
+
 
 static int
 zvol_update_live_volsize(zvol_state_t *zv, uint64_t volsize)
@@ -1010,6 +1090,7 @@ zvol_open(dev_t devp, int flag, int otyp, struct proc *p)
 	}
 
     mutex_exit(&zfsdev_state_lock); // Is there a race here?
+
     return zvol_open_impl(zv, flag, otyp, p);
 }
 
@@ -1022,6 +1103,8 @@ zvol_close_impl(zvol_state_t *zv, int flag, int otyp, struct proc *p)
 	int error = 0;
 
 	mutex_enter(&zfsdev_state_lock);
+
+    dprintf("zvol_close_impl\n");
 
 	if (zv->zv_flags & ZVOL_EXCL) {
 		ASSERT(zv->zv_total_opens == 1);
@@ -1604,18 +1687,19 @@ zvol_write(dev_t dev, struct uio *uio, int p)
  * that we can call io->writeBytes to read into IOKit zvolumes.
  */
 int
-zvol_read_iokit(zvol_state_t *zv, uint64_t offset, uint64_t count, void *iomem)
+zvol_read_iokit(zvol_state_t *zv, uint64_t position, uint64_t count, void *iomem)
 {
 	uint64_t volsize;
 	rl_t *rl;
 	int error = 0;
+    uint64_t offset = 0;
 
 	if (zv == NULL)
 		return (ENXIO);
 
 	volsize = zv->zv_volsize;
 	if (count > 0 &&
-	    (offset < 0 || offset >= volsize))
+	    (position < 0 || position >= volsize))
 		return (EIO);
 
 #if 0
@@ -1625,21 +1709,25 @@ zvol_read_iokit(zvol_state_t *zv, uint64_t offset, uint64_t count, void *iomem)
 		return (error);
 	}
 #endif
+    //printf("zvol_read_iokit(offset 0x%llx bytes 0x%llx)\n", offset, count);
 
-	rl = zfs_range_lock(&zv->zv_znode, offset, count,
+	rl = zfs_range_lock(&zv->zv_znode, position, count,
 	    RL_READER);
-	while (count > 0 && offset < volsize) {
+	while (count > 0 && (position+offset) < volsize) {
 		uint64_t bytes = MIN(count, DMU_MAX_ACCESS >> 1);
 
 		/* don't read past the end */
-		if (bytes > volsize - offset)
-			bytes = volsize - offset;
+		if (bytes > volsize - (position + offset))
+			bytes = volsize - (position + offset);
 
-        dprintf("zvol_read_iokit: offset %llu len %llu bytes %llu\n",
-                offset, count, bytes);
+        dprintf("zvol_read_iokit: position %llu offset %llu len %llu bytes %llu\n",
+               position, offset, count, bytes);
 
-		error =  dmu_read_iokit(zv->zv_objset, ZVOL_OBJ, &offset, &bytes,
+		error =  dmu_read_iokit(zv->zv_objset, ZVOL_OBJ, &offset, position,
+                                &bytes,
                                 iomem);
+        if (bytes) printf("weird, read bytes remaining 0x%llx\n", bytes);
+
 		if (error) {
 			/* convert checksum errors into IO errors */
 			if (error == ECKSUM)
@@ -1649,6 +1737,11 @@ zvol_read_iokit(zvol_state_t *zv, uint64_t offset, uint64_t count, void *iomem)
         count -= MIN(count, DMU_MAX_ACCESS >> 1) - bytes;
 	}
 	zfs_range_unlock(rl);
+
+    if (error || count)
+        printf("zvol_read_iokit not right error %d and count %d\n",
+               error, count);
+
 	return (error);
 }
 
@@ -1657,20 +1750,23 @@ zvol_read_iokit(zvol_state_t *zv, uint64_t offset, uint64_t count, void *iomem)
  * IOKit write operations will pass IOMemoryDescriptor along here, so
  * that we can call io->readBytes to write into IOKit zvolumes.
  */
+
 int
-zvol_write_iokit(zvol_state_t *zv, uint64_t offset, uint64_t count,void *iomem)
+zvol_write_iokit(zvol_state_t *zv, uint64_t position,
+                 uint64_t count,void *iomem)
 {
 	uint64_t volsize;
 	rl_t *rl;
 	int error = 0;
 	boolean_t sync;
+    uint64_t offset = 0;
 
 	if (zv == NULL)
 		return (ENXIO);
 
 	volsize = zv->zv_volsize;
 	if (count > 0 &&
-	    (offset < 0 || offset >= volsize))
+	    (position < 0 || position >= volsize))
 		return (EIO);
 
 #if 0
@@ -1681,18 +1777,21 @@ zvol_write_iokit(zvol_state_t *zv, uint64_t offset, uint64_t count,void *iomem)
 	}
 #endif
 
+    dprintf("zvol_write_iokit(position %llu offset 0x%llx bytes 0x%llx)\n",
+           position, offset, count);
+
 	sync = !(zv->zv_flags & ZVOL_WCE) ||
 	    (zv->zv_objset->os_sync == ZFS_SYNC_ALWAYS);
 
-	rl = zfs_range_lock(&zv->zv_znode, offset, count,
+	rl = zfs_range_lock(&zv->zv_znode, position, count,
 	    RL_WRITER);
-	while (count > 0 && offset < volsize) {
+	while (count > 0 && (position + offset) < volsize) {
 		uint64_t bytes = MIN(count, DMU_MAX_ACCESS >> 1);
 		uint64_t off = offset;
 		dmu_tx_t *tx = dmu_tx_create(zv->zv_objset);
 
-		if (bytes > volsize - off)	/* don't write past the end */
-			bytes = volsize - off;
+		if (bytes > volsize - (position + off))	/* don't write past the end */
+			bytes = volsize - (position + off);
 
 		dmu_tx_hold_write(tx, ZVOL_OBJ, off, bytes);
 		error = dmu_tx_assign(tx, TXG_WAIT);
@@ -1701,7 +1800,10 @@ zvol_write_iokit(zvol_state_t *zv, uint64_t offset, uint64_t count,void *iomem)
 			break;
 		}
 
-		error = dmu_write_iokit_dbuf(zv->zv_dbuf, &offset, &bytes, iomem, tx);
+		error = dmu_write_iokit_dbuf(zv->zv_dbuf, &offset, position,
+                                     &bytes, iomem, tx);
+        if (bytes) printf("weird, bytes remaining 0x%llx\n", bytes);
+
 		if (error == 0) {
             count -= MIN(count, DMU_MAX_ACCESS >> 1) + bytes;
 			zvol_log_write(zv, tx, off, bytes, sync);
@@ -1714,6 +1816,11 @@ zvol_write_iokit(zvol_state_t *zv, uint64_t offset, uint64_t count,void *iomem)
 	zfs_range_unlock(rl);
 	if (sync)
 		zil_commit(zv->zv_zilog, ZVOL_OBJ);
+
+    if (error || count)
+        printf("zvol_write_iokit not right error %d and count %d\n",
+               error, count);
+
 	return (error);
 }
 
@@ -2266,7 +2373,7 @@ zvol_init(void)
     dprintf("zvol_init\n");
 	VERIFY(ddi_soft_state_init(&zfsdev_state, sizeof (zfs_soft_state_t),
 	    1) == 0);
-	mutex_init(&zfsdev_state_lock, NULL, MUTEX_DEFAULT, NULL);
+	//mutex_init(&zfsdev_state_lock, NULL, MUTEX_DEFAULT, NULL);
     dprintf("zfsdev_state: %p\n", zfsdev_state);
     return 0;
 }
@@ -2274,7 +2381,7 @@ zvol_init(void)
 void
 zvol_fini(void)
 {
-	mutex_destroy(&zfsdev_state_lock);
+	//mutex_destroy(&zfsdev_state_lock);
 	ddi_soft_state_fini(&zfsdev_state);
 }
 
@@ -2528,6 +2635,7 @@ zvol_create_minors(char *name)
                name, error);
         return (error);
     }
+
     if (dmu_objset_type(os) == DMU_OST_ZVOL) {
         //dsl_dataset_long_hold(os->os_dsl_dataset, FTAG);
         //dsl_pool_rele(dmu_objset_pool(os), FTAG);
@@ -2538,7 +2646,8 @@ zvol_create_minors(char *name)
                    name, error);
         }
         //dsl_dataset_long_rele(os->os_dsl_dataset, FTAG);
-        dsl_dataset_rele(os->os_dsl_dataset, FTAG);
+        //dsl_dataset_rele(os->os_dsl_dataset, FTAG);
+        dmu_objset_rele(os, FTAG);
         return (error);
     }
     if (dmu_objset_type(os) != DMU_OST_ZFS) {
@@ -2572,6 +2681,7 @@ zvol_create_minors(char *name)
         if ((error = dmu_objset_hold(name, FTAG, &os)) != 0) {
             printf("ZFS WARNING: Unable to put hold on %s (error=%d).\n",
                    name, error);
+            kmem_free(osname, MAXPATHLEN);
             return (error);
         }
     }

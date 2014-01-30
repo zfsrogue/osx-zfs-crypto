@@ -65,6 +65,11 @@ extern "C" {
  */
 #define	ZFS_SNAPDEV_HIDDEN		0
 #define	ZFS_SNAPDEV_VISIBLE		1
+/*
+ * Property values for acltype
+ */
+#define	ZFS_ACLTYPE_OFF			0
+#define	ZFS_ACLTYPE_POSIXACL		1
 
 /*
  * Field manipulation macros for the drr_versioninfo field of the
@@ -474,8 +479,14 @@ typedef struct zfs_creat {
 	nvlist_t	*zct_props;
 } zfs_creat_t;
 
-extern void zfs_unmount_snap(const char *);
+extern int zfs_secpolicy_snapshot_perms(const char *name, cred_t *cr);
+extern int zfs_secpolicy_rename_perms(const char *from,
+    const char *to, cred_t *cr);
+extern int zfs_secpolicy_destroy_perms(const char *name, cred_t *);
+extern int zfs_unmount_snap(const char *);
 extern void zfs_destroy_unmount_origin(const char *);
+
+extern boolean_t dataset_name_hidden(const char *name);
 
 enum zfsdev_state_type {
 	ZST_ONEXIT,
@@ -484,15 +495,15 @@ enum zfsdev_state_type {
 };
 
 typedef struct zfsdev_state {
-        list_node_t             zs_next;        /* next zfsdev_state_t link */
-	struct file		*zs_file;	/* associated file struct */
-    //	minor_t			zs_minor;	/* made up minor number */
+    list_node_t             zs_next;        /* next zfsdev_state_t link */
+	dev_t   		zs_dev;	/* associated file struct */
+  	minor_t			zs_minor;	/* made up minor number */
 	void			*zs_onexit;	/* onexit data */
 	void			*zs_zevent;	/* zevent data */
 } zfsdev_state_t;
 
 extern void *zfsdev_get_state(minor_t minor, enum zfsdev_state_type which);
-extern minor_t zfsdev_getminor(struct file *filp);
+extern minor_t zfsdev_getminor(dev_t dev);
 extern minor_t zfsdev_minor_alloc(void);
 
 extern void zfs_ioctl_init(void);

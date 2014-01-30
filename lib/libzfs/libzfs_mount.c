@@ -203,35 +203,15 @@ dir_is_empty(const char *dirname)
 boolean_t
 is_mounted(libzfs_handle_t *zfs_hdl, const char *special, char **where)
 {
-    struct mnttab search = { 0 }, entry;
+	struct mnttab entry;
 
-#if 0
-    /*
-     * Search for the entry in /etc/mnttab.  We don't bother getting the
-     * mountpoint, as we can just search for the special device.  This will
-     * also let us find mounts when the mountpoint is 'legacy'.
-     */
-    search.mnt_special = (char *)special;
-    search.mnt_fstype = MNTTYPE_ZFS;
+	if (libzfs_mnttab_find(zfs_hdl, special, &entry) != 0)
+		return (B_FALSE);
 
-    if (getmntany(zfs_hdl->libzfs_mnttab, &entry, &search) != 0) {
-        return (B_FALSE);
-    }
+	if (where != NULL)
+		*where = zfs_strdup(zfs_hdl, entry.mnt_mountp);
 
-    if (where != NULL)
-        *where = zfs_strdup(zfs_hdl, entry.mnt_mountp);
-#else
-
-        if (libzfs_mnttab_find(zfs_hdl, special, &entry) != 0)
-                return (B_FALSE);
-
-        if (where != NULL)
-                *where = zfs_strdup(zfs_hdl, entry.mnt_mountp);
-
-#endif
-
-
-    return (B_TRUE);
+	return (B_TRUE);
 }
 
 boolean_t
@@ -303,7 +283,7 @@ do_mount(const char *src, const char *mntpt, char *opts)
 	    "-t", MNTTYPE_ZFS,
 	    "-o", opts,
 	    (char *)src,
-            (char *)mntpt,
+	    (char *)mntpt,
 	    (char *)NULL };
 	int rc;
 
@@ -311,20 +291,22 @@ do_mount(const char *src, const char *mntpt, char *opts)
 	rc = libzfs_run_process(argv[0], argv, STDOUT_VERBOSE|STDERR_VERBOSE);
 	if (rc) {
 		if (rc & MOUNT_FILEIO)
-			return EIO;
+			return (EIO);
 		if (rc & MOUNT_USER)
-			return EINTR;
+			return (EINTR);
 		if (rc & MOUNT_SOFTWARE)
-			return EPIPE;
+			return (EPIPE);
+		if (rc & MOUNT_BUSY)
+			return (EBUSY);
 		if (rc & MOUNT_SYSERR)
-			return EAGAIN;
+			return (EAGAIN);
 		if (rc & MOUNT_USAGE)
-			return EINVAL;
+			return (EINVAL);
 
-		return ENXIO; /* Generic error */
+		return (ENXIO); /* Generic error */
 	}
 
-	return 0;
+	return (0);
 }
 
 static int
@@ -429,7 +411,7 @@ zfs_add_options(zfs_handle_t *zhp, uint64_t *flags)
     if (!value) *flags |= MNT_DONTBROWSE;
         value = getprop_uint64(zhp, ZFS_PROP_APPLE_IGNOREOWNER, &source);
     if (value) *flags |= MNT_IGNORE_OWNERSHIP;
-	
+
     /*
 	value = getprop_uint64(zhp, ZFS_PROP_NBMAND, &source);
     if (!value) *flags |= MNT_NOXATTR;
@@ -509,40 +491,9 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 	 */
 	//strlcat(mntopts, "," MNTOPT_ZFSUTIL, sizeof (mntopts));
 
-#ifdef __APPLE__
-    /*
-     * Temporarily we work around letting snapshots be mounted with 'zfs mount'
-     * until we can find a way to issue mounts from the kernel.
-     * Strip off the "@name" part, to look up the parent dataset's mountpoint
-     * then append the ".zfs/snapshot/name" part to the mountpoint.
-     */
-    if (zhp->zfs_type == ZFS_TYPE_SNAPSHOT) {
-        char *r = NULL;
-        char *parent_name = strdup(zhp->zfs_name);
-        zfs_handle_t *zhp_parent;
-        r = strchr(parent_name, '@');
-        if (r) {
-
-            *r = 0;
-
-            if ((zhp_parent = zfs_open(zhp->zfs_hdl, parent_name,
-                                       ZFS_TYPE_FILESYSTEM)) != NULL) {
-                zfs_prop_get(zhp_parent, ZFS_PROP_MOUNTPOINT, mountpoint,
-                             sizeof(mountpoint),
-                             NULL, NULL, 0, B_FALSE);
-                strcat(mountpoint, "/.zfs/snapshot/");
-                strcat(mountpoint, &r[1]);
-                fprintf(stderr, "ZFS: snapshot mountpoint '%s'\n", mountpoint);
-                free(parent_name);
-                zfs_close(zhp_parent);
-            } // zfs_open
-        } // if r
-    } else // snapshot
-#endif
-    /* WARNING ^^^ DANGLING "ELSE" ABOVE */
 	if (!zfs_is_mountable(zhp, mountpoint, sizeof (mountpoint), NULL)) {
 		return (0);
-    }
+	}
 
 	/* Create the directory if it doesn't already exist */
 	if (lstat(mountpoint, &buf) != 0) {
@@ -624,6 +575,11 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 		    zhp->zfs_name));
 	}
 
+#ifdef __APPLE__
+	if (zhp->zfs_type == ZFS_TYPE_SNAPSHOT)
+		fprintf(stderr, "ZFS: snapshot mountpoint '%s'\n", mountpoint);
+#endif
+
 	/* remove the mounted entry before re-adding on remount */
 	if (remount)
 		libzfs_mnttab_remove(hdl, zhp->zfs_name);
@@ -702,6 +658,7 @@ zfs_unmount(zfs_handle_t *zhp, const char *mountpoint, int flags)
             (void) zfs_share_nfs(zhp);
             return (-1);
         }
+        libzfs_mnttab_remove(hdl, zhp->zfs_name);
         free(mntpt);
 
         }
@@ -1066,7 +1023,7 @@ zfs_unshare_proto(zfs_handle_t *zhp, const char *mountpoint,
 			mntpt = zfs_strdup(zhp->zfs_hdl, entry.mnt_mountp);
 
 		for (curr_proto = proto; *curr_proto != PROTO_END;
-		     curr_proto++) {
+		    curr_proto++) {
 
 			if (is_shared(hdl, mntpt, *curr_proto) &&
 			    unshare_one(hdl, zhp->zfs_name,
@@ -1340,6 +1297,7 @@ int zpool_disable_volumes(zfs_handle_t *nzhp, void *data)
     if (nzhp && nzhp->zpool_hdl && zpool_get_name(nzhp->zpool_hdl) &&
         data &&
         !strcmp(zpool_get_name(nzhp->zpool_hdl), (char *)data)) {
+
         if (zfs_get_type(nzhp) == ZFS_TYPE_VOLUME) {
             char *volume = NULL;
             printf("Attempting to eject volume '%s'\n",
@@ -1364,7 +1322,7 @@ int zpool_disable_volumes(zfs_handle_t *nzhp, void *data)
         }
     }
 
-    (void) zfs_iter_children(nzhp, zpool_disable_volumes, NULL);
+    (void) zfs_iter_children(nzhp, zpool_disable_volumes, data);
     zfs_close(nzhp);
     return (0);
 }
@@ -1381,35 +1339,27 @@ int
 zpool_disable_datasets(zpool_handle_t *zhp, boolean_t force)
 {
 	int used, alloc;
+	struct mnttab entry;
 	size_t namelen;
 	char **mountpoints = NULL;
 	zfs_handle_t **datasets = NULL;
 	libzfs_handle_t *hdl = zhp->zpool_hdl;
-	mnttab_node_t *mntn;
 	int i;
 	int ret = -1;
 	int flags = (force ? MS_FORCE : 0);
 
 	namelen = strlen(zhp->zpool_name);
 
+	rewind(hdl->libzfs_mnttab);
 	used = alloc = 0;
-
-    /*
-     * It appears the userland AVL stuff is broken, the call to avl_first
-     * returns NULL when we want to export.
-     * Temporarily replaced with a call to list OS mounted filesystems
-     * and if type ZFS, check for unmount
-     */
-	for (mntn = libzfs_mnttab_first(hdl); mntn != NULL;
-	     mntn = libzfs_mnttab_next(hdl, mntn)) {
-		struct mnttab *mt = &mntn->mtn_mt;
+	while (getmntent(hdl->libzfs_mnttab, &entry) == 0) {
 		/*
 		 * Ignore filesystems not within this pool.
 		 */
-		if (mt->mnt_mountp == NULL ||
-		    strncmp(mt->mnt_special, zhp->zpool_name, namelen) != 0 ||
-		    (mt->mnt_special[namelen] != '/' &&
-		    mt->mnt_special[namelen] != '\0'))
+		if (entry.mnt_fstype == NULL ||
+		    strncmp(entry.mnt_special, zhp->zpool_name, namelen) != 0 ||
+		    (entry.mnt_special[namelen] != '/' &&
+		    entry.mnt_special[namelen] != '\0'))
 			continue;
 
 		/*
@@ -1446,16 +1396,16 @@ zpool_disable_datasets(zpool_handle_t *zhp, boolean_t force)
 			}
 		}
 
-		mountpoints[used] = zfs_strdup(hdl, mt->mnt_mountp);
-		if (mountpoints[used] == NULL)
-			goto out;
+               if ((mountpoints[used] = zfs_strdup(hdl,
+                    entry.mnt_mountp)) == NULL)
+                        goto out;
 
 		/*
 		 * This is allowed to fail, in case there is some I/O error.  It
 		 * is only used to determine if we need to remove the underlying
 		 * mountpoint, so failure is not fatal.
 		 */
-		datasets[used] = make_dataset_handle(hdl, mt->mnt_special);
+		datasets[used] = make_dataset_handle(hdl, entry.mnt_special);
 
 		used++;
 	}

@@ -687,12 +687,12 @@ libzfs_run_process(const char *path, char *argv[], int flags)
 		while ((rc = waitpid(pid, &status, 0)) == -1 &&
 			errno == EINTR);
 		if (rc < 0 || !WIFEXITED(status))
-			return -1;
+			return (-1);
 
-		return WEXITSTATUS(status);
+		return (WEXITSTATUS(status));
 	}
 
-	return -1;
+	return (-1);
 }
 
 int
@@ -736,14 +736,14 @@ libzfs_init(void)
 
 	if ((hdl->libzfs_fd = open(ZFS_DEV, O_RDWR)) < 0) {
 		(void) fprintf(stderr, gettext("Unable to open %s: %s.\n"),
-			       ZFS_DEV, strerror(errno));
+		    ZFS_DEV, strerror(errno));
 		if (errno == ENOENT)
 			(void) fprintf(stderr,
 			     gettext("Verify the ZFS module stack is "
 			     "loaded by running '" MODLOAD_CMD "' as root.\n"));
-        free(hdl);
-        return (NULL);
-    }
+		free(hdl);
+		return (NULL);
+	}
 
 #ifdef HAVE_SETMNTENT
 	if ((hdl->libzfs_mnttab = setmntent(MNTTAB, "r")) == NULL) {
@@ -757,12 +757,16 @@ libzfs_init(void)
 		return (NULL);
 	}
 
-	hdl->libzfs_mnttab_enable = B_TRUE;
+#ifdef SHARETAB
+	hdl->libzfs_sharetab = fopen(ZFS_EXPORTS_PATH, "r");
+#endif
 
 	if (libzfs_core_init() != 0) {
 		(void) close(hdl->libzfs_fd);
 		(void) fclose(hdl->libzfs_mnttab);
+#ifdef SHARETAB
 		(void) fclose(hdl->libzfs_sharetab);
+#endif
 		free(hdl);
 		return (NULL);
 	}
@@ -770,11 +774,10 @@ libzfs_init(void)
 	zfs_prop_init();
 	zpool_prop_init();
 	zpool_feature_init();
+	libzfs_mnttab_init(hdl);
 #ifdef __APPLE__
 	libshare_init();
 #endif
-
-	libzfs_mnttab_init(hdl);
 
     //fprintf(stderr, "make_dataset_handle %p\r\n", hdl->libzfs_log_str);
 
@@ -845,6 +848,7 @@ zfs_path_to_zhandle(libzfs_handle_t *hdl, char *path, zfs_type_t argtype)
 		return (NULL);
 	}
 
+#ifdef sun
 	rewind(hdl->libzfs_mnttab);
 	while ((ret = getextmntent(hdl->libzfs_mnttab, &entry, 0)) == 0) {
 		if (makedevice(entry.mnt_major, entry.mnt_minor) ==
@@ -852,6 +856,19 @@ zfs_path_to_zhandle(libzfs_handle_t *hdl, char *path, zfs_type_t argtype)
 			break;
 		}
 	}
+#else
+	{
+		struct statfs sfs;
+
+		ret = statfs(path, &sfs);
+		if (ret == 0)
+			statfs2mnttab(&sfs, &entry);
+		else {
+			(void) fprintf(stderr, "%s: %s\n", path,
+			    strerror(errno));
+		}
+        }
+#endif        /* sun */
 	if (ret != 0) {
 		return (NULL);
 	}
@@ -966,7 +983,7 @@ zfs_strcmp_shortname(char *name, char *cmp_name, int wholedisk)
 		if (wholedisk)
 			path_len = zfs_append_partition(path_name, MAXPATHLEN);
 
-		if ((path_len == cmp_len) && !strcmp(path_name, cmp_name)) {
+		if ((path_len == cmp_len) && strcmp(path_name, cmp_name) == 0) {
 			error = 0;
 			break;
 		}
@@ -1008,9 +1025,9 @@ zfs_strcmp_pathname(char *name, char *cmp, int wholedisk)
 	}
 
 	if (name[0] != '/')
-		return zfs_strcmp_shortname(name, cmp_name, wholedisk);
+		return (zfs_strcmp_shortname(name, cmp_name, wholedisk));
 
-	strncpy(path_name, name, MAXPATHLEN);
+	strlcpy(path_name, name, MAXPATHLEN);
 	path_len = strlen(path_name);
 	cmp_len = strlen(cmp_name);
 
@@ -1133,14 +1150,16 @@ zfs_ioctl(libzfs_handle_t *hdl, int request, zfs_cmd_t *zc)
 
 
 	//zc->zc_history = (uint64_t)(uintptr_t)hdl->libzfs_log_str;
+	int original_errno = errno;
+	errno = 0;
 	error = ioctl(hdl->libzfs_fd, request, zc);
 
 	/* normal path, zfsdev_ioctl returns the real error in zc_ioc_error */
 	if ((error == 0) && zc->zc_ioc_error) {
 		error = -1;
 		errno = zc->zc_ioc_error;
-	} else if (error) {
-		errno = error;
+	} else if (error != -1) {
+		errno = original_errno;
 	}
 
 	/*
@@ -1397,10 +1416,10 @@ str2shift(libzfs_handle_t *hdl, const char *buf)
 	 */
 	if (buf[1] == '\0' ||
 	    (toupper(buf[0]) != 'B' &&
-	     ((toupper(buf[1]) == 'B' && buf[2] == '\0') ||
-	      (toupper(buf[1]) == 'I' && toupper(buf[2]) == 'B' &&
-	       buf[3] == '\0'))))
-		return (10*i);
+	    ((toupper(buf[1]) == 'B' && buf[2] == '\0') ||
+	    (toupper(buf[1]) == 'I' && toupper(buf[2]) == 'B' &&
+	    buf[3] == '\0'))))
+		return (10 * i);
 
 	if (hdl)
 		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,

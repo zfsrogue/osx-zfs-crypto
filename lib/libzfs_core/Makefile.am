@@ -7,9 +7,9 @@ DEFAULT_INCLUDES += \
 lib_LTLIBRARIES = libzfs_core.la
 
 libzfs_core_la_SOURCES = \
-	$(top_srcdir)/lib/libzfs_core/libzfs_core.c
+	libzfs_core.c
 
 libzfs_core_la_LIBADD = \
 	$(top_builddir)/lib/libnvpair/libnvpair.la
 
-libzfs_core_la_LDFLAGS = -pthread -version-info 1:1:0
+libzfs_core_la_LDFLAGS = -version-info 1:0:0

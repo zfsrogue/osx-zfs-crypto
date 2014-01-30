@@ -73,6 +73,7 @@
 #include <sys/list.h>
 #include <sys/uio.h>
 #include <sys/zfs_debug.h>
+#include <sys/zfs_delay.h>
 #include <sys/sdt.h>
 #include <sys/kstat.h>
 #include <sys/u8_textprep.h>
@@ -306,8 +307,8 @@ extern void cv_broadcast(kcondvar_t *cv);
 /*
  * kstat creation, installation and deletion
  */
-extern kstat_t *kstat_create(char *, int,
-    char *, char *, uchar_t, ulong_t, uchar_t);
+extern kstat_t *kstat_create(const char *, int,
+    const char *, const char *, uchar_t, ulong_t, uchar_t);
 extern void kstat_install(kstat_t *);
 extern void kstat_delete(kstat_t *);
 
@@ -664,6 +665,7 @@ int uio_iovcnt( struct uio *a_uio );
 #define USEC_TO_TICK(usec)      ((usec) / (MICROSEC / hz))
 #define NSEC_TO_TICK(usec)      ((usec) / (NANOSEC / hz))
 
+#define SET_ERROR(X) (X)
 
 #endif /* !_KERNEL */
 

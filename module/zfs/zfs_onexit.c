@@ -20,6 +20,7 @@
  */
 /*
  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013 by Delphix. All rights reserved.
  */
 
 #include <sys/types.h>
@@ -82,7 +83,6 @@ zfs_onexit_init(zfs_onexit_t **zop)
 	mutex_init(&zo->zo_lock, NULL, MUTEX_DEFAULT, NULL);
 	list_create(&zo->zo_actions, sizeof (zfs_onexit_action_node_t),
 	    offsetof(zfs_onexit_action_node_t, za_link));
-    printf("onexit_init\n");
 }
 
 void
@@ -103,7 +103,6 @@ zfs_onexit_destroy(zfs_onexit_t *zo)
 	list_destroy(&zo->zo_actions);
 	mutex_destroy(&zo->zo_lock);
 	kmem_free(zo, sizeof (zfs_onexit_t));
-    printf("onexit_destroy\n");
 }
 
 static int
@@ -111,7 +110,7 @@ zfs_onexit_minor_to_state(minor_t minor, zfs_onexit_t **zo)
 {
 	*zo = zfsdev_get_state(minor, ZST_ONEXIT);
 	if (*zo == NULL)
-		return (EBADF);
+		return (SET_ERROR(EBADF));
 
 	return (0);
 }
@@ -127,28 +126,25 @@ zfs_onexit_fd_hold(int fd, minor_t *minorp)
 {
 	file_t *fp = NULL;
 	zfs_onexit_t *zo;
-
-    struct vnode *vpp;
     uint32_t vipd;
+    vattr_t va;
 
-    return 0; // Not implemented
-
-    if (file_vnode_withvid(fd, &vpp, &vipd))
+    fp = getf(fd);
+    if (fp == NULL)
         return EBADF;
 
-	//*minorp = zfsdev_getminor(fp->f_file);
-    printf("onexit_fd_hold (%d -> %p)\n", fd, vpp);
-
-	return (zfs_onexit_minor_to_state(*minorp, &zo));
+#ifdef __APPLE__
+    *minorp = zfsdev_getminor(current_proc());
+#else
+    *minorp = zfsdev_getminor(fp->f_file);
+#endif
+    return (zfs_onexit_minor_to_state(*minorp, &zo));
 }
 
 void
 zfs_onexit_fd_rele(int fd)
 {
-    return; // Not implemented
-	//releasef(fd);
-    printf("onexit_fd_rele %d\n", fd);
-    file_drop(fd);
+    releasef(fd);
 }
 
 /*
@@ -222,7 +218,7 @@ zfs_onexit_del_cb(minor_t minor, uint64_t action_handle, boolean_t fire)
 		kmem_free(ap, sizeof (zfs_onexit_action_node_t));
 	} else {
 		mutex_exit(&zo->zo_lock);
-		error = ENOENT;
+		error = SET_ERROR(ENOENT);
 	}
 
 	return (error);
@@ -251,7 +247,7 @@ zfs_onexit_cb_data(minor_t minor, uint64_t action_handle, void **data)
 	if (ap != NULL)
 		*data = ap->za_data;
 	else
-		error = ENOENT;
+		error = SET_ERROR(ENOENT);
 	mutex_exit(&zo->zo_lock);
 
 	return (error);
