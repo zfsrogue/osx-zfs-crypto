@@ -745,11 +745,8 @@ typedef struct dmu_recv_begin_arg {
 	const char *drba_origin;
 	dmu_recv_cookie_t *drba_cookie;
 	cred_t *drba_cred;
-<<<<<<< HEAD
     dsl_crypto_ctx_t *drba_dcc;
-=======
 	uint64_t drba_snapobj;
->>>>>>> upstream/master
 } dmu_recv_begin_arg_t;
 
 static int
@@ -990,12 +987,8 @@ dmu_recv_begin_sync(void *arg, dmu_tx_t *tx)
 			    drba->drba_snapobj, FTAG, &snap));
 		}
 		dsobj = dsl_dataset_create_sync(ds->ds_dir, recv_clone_name,
-<<<<<<< HEAD
                         ds->ds_prev, drba->drba_dcc, crflags, drba->drba_cred, tx);
-=======
-		    snap, crflags, drba->drba_cred, tx);
 		dsl_dataset_rele(snap, FTAG);
->>>>>>> upstream/master
 		dsl_dataset_rele(ds, FTAG);
 	} else {
 		dsl_dir_t *dd;

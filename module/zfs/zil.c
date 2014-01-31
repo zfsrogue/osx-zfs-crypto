@@ -958,10 +958,6 @@ zil_lwb_write_init(zilog_t *zilog, lwb_t *lwb)
 	if (rzio == NULL) {
 		zilog->zl_root_zio = rzio = zio_root(zilog->zl_spa, NULL, NULL,
 		    ZIO_FLAG_CANFAIL);
-		if (zilog->zl_logbias == ZFS_LOGBIAS_LATENCY)
-			rzio->io_priority = ZIO_PRIORITY_LOG_WRITE;
-		else
-			rzio->io_priority = ZIO_PRIORITY_ASYNC_WRITE;
 	}
 
 	/* Lock so zil_sync() doesn't fastwrite_unmark after zio is created */

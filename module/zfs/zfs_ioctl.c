@@ -3208,13 +3208,10 @@ zfs_get_crypto_ctx(char *name, zfs_ioc_crypto_t *zic, dsl_crypto_ctx_t *dcc)
     zcrypt_key_t *wkey;
     dsl_pool_t *dp;
 
-    printf("get_crypto_ctx\n");
-
     if (zic->zic_cmd != 0 &&
         zfs_earlier_version(name, SPA_VERSION_FEATURES))
         return (ENOTSUP);
 
-    printf("pool version ok\n");
     /*
      * Special check aes-128-ctr which isn't settable from
      * userland or at create time, it is only allowed to be
@@ -3223,7 +3220,6 @@ zfs_get_crypto_ctx(char *name, zfs_ioc_crypto_t *zic, dsl_crypto_ctx_t *dcc)
 
     switch (zic->zic_cmd) {
     case ZFS_IOC_CRYPTO_KEY_LOAD:
-    printf("load key\n");
         error = zcrypt_key_from_ioc(zic,
                                     &dcc->dcc_wrap_key);
         if (error != 0) {
@@ -3288,8 +3284,6 @@ zfs_ioc_create(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
 	boolean_t is_insensitive = B_FALSE;
     zfs_ioc_crypto_t *zic = NULL;
     unsigned int size;
-
-    printf("ioc_create\n");
 
 	if (nvlist_lookup_int32(innvl, "type", &type32) != 0)
 		return (SET_ERROR(EINVAL));
@@ -3678,7 +3672,6 @@ zfs_ioc_destroy_snaps_nvl(zfs_cmd_t *zc)
         (void) zvol_remove_minor(name);
     }
 
-    printf("dmu_snapshots_destroy_nvl was removed\n");
     //err = dmu_snapshots_destroy_nvl(nvl, zc->zc_defer_destroy,
     //                              zc->zc_name);
     nvlist_free(nvl);
@@ -3766,91 +3759,27 @@ zfs_ioc_destroy(zfs_cmd_t *zc)
  * }
  */
 /* ARGSUSED */
-static int
 zfs_ioc_rollback(const char *fsname, nvlist_t *args, nvlist_t *outnvl)
 {
-	zfsvfs_t *zsb;
+    zfsvfs_t *zsb;
     int error;
-    dsl_dataset_t *ds = NULL, *clone;
-	char *clone_name;
-    dsl_crypto_ctx_t dcc = { 0 };
-    zfs_crypt_key_status_t keystatus;
-    dsl_pool_t *dp = NULL;
 
-    error = dsl_pool_hold(zc->zc_name, FTAG, &dp);
-	if (error) return error;
+    if (getzfsvfs(fsname, &zsb) == 0) {
+        error = zfs_suspend_fs(zsb);
+        if (error == 0) {
+            int resume_err;
 
-	error = dsl_dataset_hold(dp, zc->zc_name, FTAG, &ds);
-	if (error) {
-        dsl_pool_rele(dp, FTAG);
-		return (error);
+            error = dsl_dataset_rollback(fsname, zsb, NULL,outnvl);
+            resume_err = zfs_resume_fs(zsb, fsname);
+            error = error ? error : resume_err;
+        }
+        //deactivate_super(zsb->z_zfsvfs);
+    } else {
+        error = dsl_dataset_rollback(fsname, NULL, NULL, outnvl);
     }
-
-	/* must not be a snapshot */
-	if (dsl_dataset_is_snapshot(ds)) {
-		dsl_dataset_rele(ds, FTAG);
-        dsl_pool_rele(dp, FTAG);
-		return (EINVAL);
-	}
-
-	/* must have a most recent snapshot */
-	if (ds->ds_phys->ds_prev_snap_txg < TXG_INITIAL) {
-		dsl_dataset_rele(ds, FTAG);
-        dsl_pool_rele(dp, FTAG);
-		return (EINVAL);
-	}
-
-    /*
-     * For encrypted datasets we need the wrapping key
-     * since rollback is implemented via cloning.
-     */
-    keystatus = dsl_dataset_keystatus(ds, B_FALSE);
-    if (keystatus == ZFS_CRYPT_KEY_UNAVAILABLE) {
-        dsl_dataset_rele(ds, FTAG);
-        dsl_pool_rele(dp, FTAG);
-        return (ENOKEY);
-    } else if (keystatus == ZFS_CRYPT_KEY_AVAILABLE) {
-        dcc.dcc_wrap_key = zcrypt_key_copy(
-                     zcrypt_keystore_find_wrappingkey(
-                            dsl_dataset_get_spa(ds), ds->ds_object));
-    }
-
-    /*
-     * Create clone of most recent snapshot, passing in
-     * the wrapping key for ds if there is one.
-     */
-	clone_name = kmem_asprintf("%s/%%rollback", zc->zc_name);
-	error = dmu_objset_clone(clone_name, ds->ds_prev, &dcc);
-	if (error)
-		goto out;
-
-	error = dsl_dataset_own(clone_name, B_TRUE, FTAG, &clone);
-	if (error)
-		goto out;
-
-	if (getzfsvfs(fsname, &zsb) == 0) {
-		error = zfs_suspend_fs(zsb);
-		if (error == 0) {
-			int resume_err;
-
-			error = dsl_dataset_rollback(fsname, zsb, outnvl);
-			resume_err = zfs_resume_fs(zsb, fsname);
-			error = error ? error : resume_err;
-		}
-		//deactivate_super(zsb->z_sb);
-	} else {
-		error = dsl_dataset_rollback(fsname, NULL, outnvl);
-	}
-
-out:
-    strfree(clone_name);
-    if (ds)
-        dsl_dataset_rele(ds, FTAG);
-    if (dp)
-        dsl_pool_rele(dp, FTAG);
-
-	return (error);
+    return (error);
 }
+
 
 static int
 recursive_unmount(const char *fsname, void *arg)
@@ -4551,6 +4480,7 @@ zfs_ioc_recv(zfs_cmd_t *zc)
     offset_t off;
     nvlist_t *props = NULL; /* sent properties */
     nvlist_t *origprops = NULL; /* existing properties */
+    dsl_crypto_ctx_t dcc = { 0 };
     char *origin = NULL;
     char *tosnap;
     char tofs[ZFS_MAXNAMELEN];
@@ -4579,11 +4509,15 @@ zfs_ioc_recv(zfs_cmd_t *zc)
 
     VERIFY(nvlist_alloc(&errors, NV_UNIQUE_NAME, KM_SLEEP) == 0);
 
+    if ((error = zfs_get_crypto_ctx(zc->zc_name, &zc->zc_crypto, &dcc)) != 0) {
+        return (error);
+    }
+
     if (zc->zc_string[0])
         origin = zc->zc_string;
 
     error = dmu_recv_begin(tofs, tosnap,
-                           &zc->zc_begin_record, force, origin, &drc);
+                           &zc->zc_begin_record, force, origin, &drc, &dcc);
     if (error != 0)
         goto out;
 
@@ -6651,7 +6585,7 @@ zfsdev_ioctl(dev_t dev, u_long cmd, caddr_t data,  __unused int flag, struct pro
 	zc = (zfs_cmd_t *)data;
 	zc->zc_dev = dev;
 
-	printf("[zfs] got ioctl %d nvlist_sz %d (err %d)\n", vec,
+	dprintf("[zfs] got ioctl %d nvlist_sz %d (err %d)\n", vec,
             zc->zc_nvlist_src_size, error);
 
     if (zc->zc_nvlist_src_size != 0) {
@@ -6702,7 +6636,7 @@ zfsdev_ioctl(dev_t dev, u_long cmd, caddr_t data,  __unused int flag, struct pro
         if (zfs_ioc_vec[vec].zvec_func != NULL)  {
             int puterror = 0;
 
-            printf("New call type!\n");
+            dprintf("New call type!\n");
 
             VERIFY0(nvlist_alloc(&outnvl, NV_UNIQUE_NAME, KM_PUSHPAGE));
             error = zfs_ioc_vec[vec].zvec_func(zc->zc_name, innvl, outnvl);
@@ -6722,7 +6656,7 @@ zfsdev_ioctl(dev_t dev, u_long cmd, caddr_t data,  __unused int flag, struct pro
             if (puterror != 0)
                 error = puterror;
 
-            printf("New call type done %d\n", error);
+            dprintf("New call type done %d\n", error);
             nvlist_free(outnvl);
 
         } else { /* New or Legacy style call */
