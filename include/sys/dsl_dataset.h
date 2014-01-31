@@ -275,7 +275,9 @@ int dsl_dataset_snap_lookup(dsl_dataset_t *ds, const char *name,
 int dsl_dataset_snap_remove(dsl_dataset_t *ds, const char *name, dmu_tx_t *tx);
 void dsl_dataset_set_refreservation_sync_impl(dsl_dataset_t *ds,
     zprop_source_t source, uint64_t value, dmu_tx_t *tx);
-int dsl_dataset_rollback(const char *fsname, void *owner, nvlist_t *result);
+int dsl_dataset_rollback(const char *fsname, void *owner,
+                         struct dsl_crypto_ctx *dcc,
+                         nvlist_t *result);
 
 int dmu_send_estimate(dsl_dataset_t *ds, dsl_dataset_t *fromds,
     uint64_t *sizep);

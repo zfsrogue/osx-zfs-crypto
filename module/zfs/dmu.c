@@ -2036,7 +2036,7 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 		checksum = (dedup_checksum == ZIO_CHECKSUM_OFF) ?
 		    zio_checksum_select(dn->dn_checksum, checksum) :
 		    dedup_checksum;
-
+    }
     /*
      * Determine encryption setting.
      * This has to be after checksum and dedup selection because it
