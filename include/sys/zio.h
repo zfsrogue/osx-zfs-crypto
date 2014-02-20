@@ -150,20 +150,6 @@ enum zio_crypt {
 #define ZIO_CRYPT_ON_VALUE      ZIO_CRYPT_AES_128_CCM
 #define ZIO_CRYPT_DEFAULT       ZIO_CRYPT_OFF
 
-#define	ZIO_PRIORITY_NOW		(zio_priority_table[0])
-#define	ZIO_PRIORITY_SYNC_READ		(zio_priority_table[1])
-#define	ZIO_PRIORITY_SYNC_WRITE		(zio_priority_table[2])
-#define	ZIO_PRIORITY_LOG_WRITE		(zio_priority_table[3])
-#define	ZIO_PRIORITY_CACHE_FILL		(zio_priority_table[4])
-#define	ZIO_PRIORITY_AGG		(zio_priority_table[5])
-#define	ZIO_PRIORITY_FREE		(zio_priority_table[6])
-#define	ZIO_PRIORITY_ASYNC_WRITE	(zio_priority_table[7])
-#define	ZIO_PRIORITY_ASYNC_READ		(zio_priority_table[8])
-#define	ZIO_PRIORITY_RESILVER		(zio_priority_table[9])
-#define	ZIO_PRIORITY_SCRUB		(zio_priority_table[10])
-#define	ZIO_PRIORITY_DDT_PREFETCH	(zio_priority_table[11])
-#define	ZIO_PRIORITY_TABLE_SIZE		12
-
 typedef enum zio_priority {
 	ZIO_PRIORITY_SYNC_READ,
 	ZIO_PRIORITY_SYNC_WRITE,	/* ZIL */

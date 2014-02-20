@@ -1820,6 +1820,7 @@ typedef struct dsl_dataset_rollback_arg {
 	const char *ddra_fsname;
 	void *ddra_owner;
 	nvlist_t *ddra_result;
+  dsl_crypto_ctx_t *ddra_dcc;
 } dsl_dataset_rollback_arg_t;
 
 static int
@@ -1926,13 +1927,16 @@ dsl_dataset_rollback_sync(void *arg, dmu_tx_t *tx)
  * notes above zfs_suspend_fs() for further details.
  */
 int
-dsl_dataset_rollback(const char *fsname, void *owner, nvlist_t *result)
+dsl_dataset_rollback(const char *fsname, void *owner,
+                     dsl_crypto_ctx_t *dcc,
+                     nvlist_t *result)
 {
 	dsl_dataset_rollback_arg_t ddra;
 
 	ddra.ddra_fsname = fsname;
 	ddra.ddra_owner = owner;
 	ddra.ddra_result = result;
+    ddra.ddra_dcc = dcc;
 
 	return (dsl_sync_task(fsname, dsl_dataset_rollback_check,
 	    dsl_dataset_rollback_sync, &ddra, 1));
