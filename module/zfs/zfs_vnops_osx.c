@@ -63,6 +63,7 @@
 #ifdef _KERNEL
 #include <sys/sysctl.h>
 int debug_vnop_osx_printf = 0;
+int zfs_vnop_ignore_negatives = 0;
 #endif
 
 #define	DECLARE_CRED(ap) \
@@ -328,17 +329,31 @@ zfs_vnop_lookup(
 	DECLARE_CRED(ap);
 	int error;
     char *filename = NULL;
+    int negative_cache = 0;
 
     *ap->a_vpp = NULL;	/* In case we return an error */
 
-#if 0
+#if 1
+    /*
+     * cache_lookup() returns 0 for no-entry
+     * -1 for cache found (a_vpp set)
+     * ENOENT for negative cache
+     */
 	error = cache_lookup(ap->a_dvp, ap->a_vpp, cnp);
+
 	if (error) {
+
 		/* We found a cache entry, positive or negative. */
-		if (error == -1)	/* Positive entry? */
-			error = 0;		/* Yes.  Caller expects no error */
-		return error;
-	}
+		if (error == -1) 	/* Positive entry? */
+			return 0;		/* Yes.  Caller expects no error */
+
+        /* Negatives are only followed if not CREATE, from HFS+. */
+        if (cnp->cn_nameiop != CREATE) {
+            if (!zfs_vnop_ignore_negatives)
+                return error;
+            negative_cache = 1;
+        }
+    }
 #endif
 
     /*
@@ -351,37 +366,54 @@ zfs_vnop_lookup(
         if (filename == NULL) return ENOMEM;
         bcopy(cnp->cn_nameptr, filename, cnp->cn_namelen);
         filename[cnp->cn_namelen] = '\0';
-
     }
 
-    dprintf("+vnop_lookup '%s'\n", filename ? filename : cnp->cn_nameptr);
+    dprintf("+vnop_lookup '%s' %s\n", filename ? filename : cnp->cn_nameptr,
+            negative_cache ? "negative_cache":"");
 
 	error = zfs_lookup(ap->a_dvp,
                        filename ? filename : cnp->cn_nameptr,
                        ap->a_vpp, cnp, cnp->cn_nameiop, cr, /*flags*/ 0);
     /* flags can be LOOKUP_XATTR | FIGNORECASE */
 
-    if (filename)
-        FREE(filename, M_TEMP);
-
 #if 0
+    /*
+     * It appears that VFS layer adds negative cache entries for us, so
+     * we do not need to add them here, or they are duplicated.
+     */
     if (error == ENOENT) {
-        if ((ap->a_cnp->cn_nameiop == CREATE || ap->a_cnp->cn_nameiop == RENAME) &&
+
+        if ((ap->a_cnp->cn_nameiop == CREATE || ap->a_cnp->cn_nameiop == RENAME ||
+             (ap->a_cnp->cn_nameiop == DELETE &&
+              (cnp->cn_flags & DOWHITEOUT) &&
+              (cnp->cn_flags & ISWHITEOUT))) &&
             (cnp->cn_flags & ISLASTCN)) {
-            printf("create/rename early out\n");
             error = EJUSTRETURN;
             goto exit;
         }
 
+
         /*
 		 * Insert name into cache (as non-existent) if appropriate.
 		 */
-		if ((cnp->cn_flags & MAKEENTRY) && ap->a_cnp->cn_nameiop != CREATE)
-			cache_enter(ap->a_dvp, *ap->a_vpp, ap->a_cnp);
+		if ((cnp->cn_flags & MAKEENTRY) && ap->a_cnp->cn_nameiop != CREATE) {
+			cache_enter(ap->a_dvp, NULL, ap->a_cnp);
+            dprintf("Negative-cache made for '%s'\n",
+                    filename ? filename : cnp->cn_nameptr);
+        }
     } // ENOENT
 #endif
 
+    if (!error && negative_cache) {
+        printf("[ZFS] Incorrect negative_cache entry for '%s'\n",
+               filename ? filename : cnp->cn_nameptr);
+        cache_purge_negatives(ap->a_dvp);
+    }
+
  exit:
+    if (filename)
+        FREE(filename, M_TEMP);
+
 
     dprintf("-vnop_lookup %d\n", error);
 	return (error);
@@ -417,7 +449,6 @@ zfs_vnop_create(
     if (!error)
         cache_purge_negatives(ap->a_dvp);
 
-
     return error;
 }
 
@@ -441,6 +472,7 @@ zfs_vnop_remove(
     */
 	error = zfs_remove(ap->a_dvp, ap->a_cnp->cn_nameptr, cr, ct, /*flags*/0);
     if (!error) cache_purge(ap->a_vp);
+
     return error;
 }
 
@@ -737,10 +769,16 @@ zfs_vnop_rename(
       extern int zfs_rename(struct vnode *sdvp, char *snm, struct vnode *tdvp, char *tnm,
                             cred_t *cr, caller_context_t *ct, int flags);
     */
+        cache_purge_negatives(ap->a_fdvp);
+        cache_purge_negatives(ap->a_tdvp);
 	error = zfs_rename(ap->a_fdvp, ap->a_fcnp->cn_nameptr, ap->a_tdvp,
                        ap->a_tcnp->cn_nameptr, cr, ct, /*flags*/0);
 
-    if (!error) cache_purge_negatives(ap->a_tdvp);
+    if (!error) {
+        cache_purge(ap->a_fvp);
+        if (ap->a_tvp)
+            cache_purge(ap->a_tvp);
+    }
 
 	return (error);
 }
@@ -1447,7 +1485,7 @@ zfs_vnop_reclaim(
 #if 1
     if (!has_warned && vnop_num_reclaims > 20000) {
         has_warned = 1;
-        printf("ZFS: Reclaim thread appears dead (%llu) -- good luck\n",
+        printf("ZFS: Reclaim thread is being slow (%llu)\n",
                vnop_num_reclaims);
     }
 #endif
@@ -2844,6 +2882,3 @@ int zfs_vfsops_fini(void)
 
     return vfs_fsremove(zfs_vfsconf);
 }
-
-
-
