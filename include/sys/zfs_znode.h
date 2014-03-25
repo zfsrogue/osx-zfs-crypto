@@ -222,12 +222,15 @@ typedef struct znode {
 	nvlist_t	*z_xattr_cached; /* cached xattrs */
 	struct znode	*z_xattr_parent; /* xattr parent znode */
 	list_node_t	z_link_node;	/* all znodes in fs link */
+	list_node_t	z_link_reclaim_node;	/* all reclaim znodes in fs link */
 	sa_handle_t	*z_sa_hdl;	/* handle to sa data */
 	boolean_t	z_is_sa;	/* are we native sa? */
 
 	boolean_t	z_is_zvol;	/* are we used by the zvol */
 	boolean_t	z_is_mapped;	/* are we mmap'ed */
 	boolean_t	z_is_ctldir;	/* are we .zfs entry */
+
+    boolean_t   z_reclaimed;    /* placed in the reclaim list */
 
     krwlock_t       z_map_lock;     /* page map lock */
 
@@ -269,11 +272,6 @@ typedef struct znode {
 #define ZTOV(ZP) ((ZP)->z_vnode)
 #define VTOZ(VP)        ((znode_t *)vnode_fsnode((VP)))
 
-// Should we rename these to ZTOV, VTOZ ?
-#define	ZTOI(znode)	(&((znode)->z_vnode))
-#define	ITOZ(inode)	(container_of((vnode), znode_t, z_vnode))
-#define	ZTOZSB(znode)	((zfs_sb_t *)(ZTOI(znode)->i_sb->s_fs_info))
-#define	ITOZSB(inode)	((zfs_sb_t *)((vnode)->i_sb->s_fs_info))
 
 #define	S_ISDEV(mode)	(S_ISCHR(mode) || S_ISBLK(mode) || S_ISFIFO(mode))
 

@@ -3764,7 +3764,7 @@ spa_import_rootpool(char *devpath, char *devid)
 	spa_t *spa;
 	vdev_t *rvd, *bvd /*, *avd = NULL*/;
 	nvlist_t *config = NULL, *nvtop;
-	uint64_t guid, txg;
+	uint64_t guid = 0, txg;
 	char *pname;
 	int error;
 
@@ -4103,6 +4103,8 @@ spa_tryimport(nvlist_t *tryconfig)
 		    spa->spa_uberblock.ub_timestamp) == 0);
 		VERIFY(nvlist_add_nvlist(config, ZPOOL_CONFIG_LOAD_INFO,
 		    spa->spa_load_info) == 0);
+		VERIFY(nvlist_add_uint64(config, ZPOOL_CONFIG_ERRATA,
+		    spa->spa_errata) == 0);
 
 		/*
 		 * If the bootfs property exists on this pool then we

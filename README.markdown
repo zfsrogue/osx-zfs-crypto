@@ -2,7 +2,8 @@
 Welcome to the unofficial zfs-crypto branch.
 
 To make it clear, this branch has nothing to do with Sun, Oracle,
-ZFSOnLinux, OpenSolaris, IllumOS, OpenIndiana, SmartOS, FreeBSD etc.
+ZFSOnLinux, OpenSolaris, IllumOS, OpenIndiana, SmartOS,OpenZFSonOSX and
+FreeBSD etc.
 
 If you run a legacy pool version=30, this branch will let you
 import and upgrade your pool to the standard pool version=5000,
@@ -14,7 +15,24 @@ for the short window that it was available. Before the feature@
 pool version became standard, or when importing pools from Solaris.
 
 The original project without crypto support is available here;
-https://github.com/zfs-osx/zfs
+https://github.com/openzfsonosx/zfs
+
+
+** zfs.kext depends upon spl.kext, so start with that repository:
+https://github.com/openzfsonosx/spl.git
+
+It is tested primarily on Mac OS X Mavericks.
+
+
+Please note that 'llvm-gcc' or 'clang' should be used for compiling the KEXTs.
+Pure 'gcc' will produce unstable builds.
+
+```
+ # ./configure CC=clang CXX=clang++
+or
+ # ./configure CC=llvm-gcc CXX=llvm-g++
+```
+
 
 There are new files,
 
@@ -34,8 +52,6 @@ The crypto/api/ header files are from OpenSolaris.
 
 The crypto/api implementation is brand new, and supports "bare
 minimum" features as needed by ZFS only.
-
-Current support is in BETA.
 
 Importing a Solaris pool can be done using:
  Solaris: zpool create -o version=30 -O version=5 thepool $devices...
