@@ -1474,11 +1474,6 @@ dmu_read_iokit(objset_t *os, uint64_t object, uint64_t *offset,
                 (*size) -= done;
             }
 
-            if (done < 0) {
-                err = EIO;
-                break;
-            }
-
             //size -= tocpy;
         }
     }
@@ -1549,11 +1544,6 @@ dmu_write_iokit_dnode(dnode_t *dn, uint64_t *offset, uint64_t position,
             if (done > 0) {
                 *offset += done;
                 *size -= done;
-            }
-
-            if (done < 0) {
-                err = EIO;
-                break;
             }
         }
     }

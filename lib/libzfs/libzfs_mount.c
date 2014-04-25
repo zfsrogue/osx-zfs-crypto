@@ -391,7 +391,7 @@ zfs_add_option(zfs_handle_t *zhp, char *options, int len,
 #endif
 
 static int
-zfs_add_options(zfs_handle_t *zhp, uint64_t *flags)
+zfs_add_options(zfs_handle_t *zhp, int *flags)
 {
 	int error = 0;
     char *source;
@@ -424,12 +424,14 @@ zfs_add_options(zfs_handle_t *zhp, uint64_t *flags)
 
 
 #define MOUNT_POINT_CUSTOM_ICON ".VolumeIcon.icns"
-#define CUSTOM_ICON_PATH_LEGACY "/System/Library/Extensions/zfs.kext/Contents/Resources/VolumeIcon.icns"
-#define CUSTOM_ICON_PATH_MAVERICKS "/Library/Extensions/zfs.kext/Contents/Resources/VolumeIcon.icns"
+// RJVB 20140331: now that we use KERNEL_MODPREFIX it is no longer necessary to look in 2 locations:
+// #define CUSTOM_ICON_PATH_LEGACY "/System/Library/Extensions/zfs.kext/Contents/Resources/VolumeIcon.icns"
+// #define CUSTOM_ICON_PATH_MAVERICKS "/Library/Extensions/zfs.kext/Contents/Resources/VolumeIcon.icns"
+#define CUSTOM_ICON_PATH KERNEL_MODPREFIX "/zfs.kext/Contents/Resources/VolumeIcon.icns"
 
 #ifdef __APPLE__
 /*
- * On OSX we can set the icon to a Open ZFS specific one, just to be extra
+ * On OSX we can set the icon to an Open ZFS specific one, just to be extra
  * shiny
  */
 static void
@@ -452,12 +454,8 @@ zfs_mount_seticon(const char *mountpoint)
         return;
     }
 
-    /* check if we can read in the default ZFS icon, one of two paths
-     * trying new path first, as the second path should get rare with time
-     */
-    srcfp = fopen(CUSTOM_ICON_PATH_MAVERICKS, "r");
-    if (!srcfp)
-        srcfp = fopen(CUSTOM_ICON_PATH_LEGACY, "r");
+    /* check if we can read in the default ZFS icon */
+    srcfp = fopen(CUSTOM_ICON_PATH, "r");
 
     /* No icon, oh well, its cosmetics, so just give up */
     if (!srcfp) {
@@ -1427,7 +1425,10 @@ zpool_disable_datasets(zpool_handle_t *zhp, boolean_t force)
 
 	namelen = strlen(zhp->zpool_name);
 
-	rewind(hdl->libzfs_mnttab);
+	/* Reopen MNTTAB to prevent reading stale data from open file */
+	if (freopen(MNTTAB, "r", hdl->libzfs_mnttab) == NULL)
+		return (ENOENT);
+
 	used = alloc = 0;
 	while (getmntent(hdl->libzfs_mnttab, &entry) == 0) {
 		/*
@@ -1436,6 +1437,13 @@ zpool_disable_datasets(zpool_handle_t *zhp, boolean_t force)
 		if (entry.mnt_fstype == NULL ||
 		    strncmp(entry.mnt_special, zhp->zpool_name, namelen) != 0 ||
 		    (entry.mnt_special[namelen] != '/' &&
+#ifdef __APPLE__
+		    /*
+		     * On OS X, '@' is possible too since we're temporarily
+		     * allowing manual snapshot mounting.
+		     */
+		    entry.mnt_special[namelen] != '@' &&
+#endif /* __APPLE__ */
 		    entry.mnt_special[namelen] != '\0'))
 			continue;
 

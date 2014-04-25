@@ -46,6 +46,9 @@
 #ifdef __APPLE__
 #include <sys/disk.h>
 #include <sys/fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+int osx_device_isvirtual(char *pathbuf);
 #endif
 
 static struct uuid_to_ptag {
@@ -200,8 +203,9 @@ efi_get_info(int fd, struct dk_cinfo *dki_info)
 	} else if ((strncmp(dev_path, "/dev/md", 7) == 0)) {
 		strcpy(dki_info->dki_cname, "pseudo");
 		dki_info->dki_ctype = DKC_MD;
-		rval = sscanf(dev_path, "/dev/%[a-zA-Z0-9]p%hu",
-		    dki_info->dki_dname,
+		strcpy(dki_info->dki_dname, "md");
+		rval = sscanf(dev_path, "/dev/md%[0-9]p%hu",
+		    dki_info->dki_dname + 2,
 		    &dki_info->dki_partition);
 	} else if ((strncmp(dev_path, "/dev/vd", 7) == 0)) {
 		strcpy(dki_info->dki_cname, "vd");
@@ -212,20 +216,23 @@ efi_get_info(int fd, struct dk_cinfo *dki_info)
 	} else if ((strncmp(dev_path, "/dev/dm-", 8) == 0)) {
 		strcpy(dki_info->dki_cname, "pseudo");
 		dki_info->dki_ctype = DKC_VBD;
-		rval = sscanf(dev_path, "/dev/%[a-zA-Z0-9-]p%hu",
-		    dki_info->dki_dname,
+		strcpy(dki_info->dki_dname, "dm-");
+		rval = sscanf(dev_path, "/dev/dm-%[0-9]p%hu",
+		    dki_info->dki_dname + 3,
 		    &dki_info->dki_partition);
 	} else if ((strncmp(dev_path, "/dev/ram", 8) == 0)) {
 		strcpy(dki_info->dki_cname, "pseudo");
 		dki_info->dki_ctype = DKC_PCMCIA_MEM;
-		rval = sscanf(dev_path, "/dev/%[a-zA-Z0-9]p%hu",
-		    dki_info->dki_dname,
+		strcpy(dki_info->dki_dname, "ram");
+		rval = sscanf(dev_path, "/dev/ram%[0-9]p%hu",
+		    dki_info->dki_dname + 3,
 		    &dki_info->dki_partition);
 	} else if ((strncmp(dev_path, "/dev/loop", 9) == 0)) {
 		strcpy(dki_info->dki_cname, "pseudo");
 		dki_info->dki_ctype = DKC_VBD;
-		rval = sscanf(dev_path, "/dev/%[a-zA-Z0-9]p%hu",
-		    dki_info->dki_dname,
+		strcpy(dki_info->dki_dname, "loop");
+		rval = sscanf(dev_path, "/dev/loop%[0-9]p%hu",
+		    dki_info->dki_dname + 4,
 		    &dki_info->dki_partition);
 	} else {
 		strcpy(dki_info->dki_dname, "unknown");
@@ -243,55 +250,63 @@ efi_get_info(int fd, struct dk_cinfo *dki_info)
 
 	free(dev_path);
 #elif __APPLE__
-    // DKIOCISVIRTUAL 32bit
-    // DKIOCISSOLIDSTATE 32bit
-    char pathbuf[PATH_MAX];
-    ushort_t poi;
-    if (fcntl(fd, F_GETPATH, pathbuf) >= 0) {
+	// DKIOCISVIRTUAL 32bit
+	// DKIOCISSOLIDSTATE 32bit
+	char pathbuf[PATH_MAX];
+	ushort_t poi;
+	if (fcntl(fd, F_GETPATH, pathbuf) >= 0) {
+		if ((strncmp(pathbuf, "/dev/disk", 9) == 0)) {
+			strcpy(dki_info->dki_cname, "disk");
+			dki_info->dki_ctype = DKC_DIRECT;
+			rval = sscanf(pathbuf, "/dev/disk%hus%hu",
+			    &poi,
+			    &dki_info->dki_partition);
 
-        if ((strncmp(pathbuf, "/dev/disk", 9) == 0)) {
-            strcpy(dki_info->dki_cname, "disk");
-            dki_info->dki_ctype = DKC_DIRECT;
-            rval = sscanf(pathbuf, "/dev/disk%hus%hu",
-                          &poi,
-                          &dki_info->dki_partition);
+			switch (rval) {
+			case 0:
+				errno = EINVAL;
+				goto error;
+			case 1:
+				dki_info->dki_partition = 0;
+			}
+			strlcpy(dki_info->dki_dname,
+			    &pathbuf[5],
+			    sizeof(dki_info->dki_dname));
+		}
 
-            switch (rval) {
-            case 0:
-                errno = EINVAL;
-                goto error;
-            case 1:
-                dki_info->dki_partition = 0;
-            }
-            strlcpy(dki_info->dki_dname,
-                    &pathbuf[5],
-                    sizeof(dki_info->dki_dname));
-        }
+		/*
+		 * rdisk in OSX do not have partitions, also it will fail. Use
+		 * disk instead.
+		 */
+		if ((strncmp(pathbuf, "/dev/rdisk", 10) == 0)) {
+			strcpy(dki_info->dki_cname, "disk");
+			dki_info->dki_ctype = DKC_DIRECT;
+			dki_info->dki_partition = 0;
 
-        /*
-         * rdisk in OSX do not have partitions, also it will fail. Use disk
-         */
-        if ((strncmp(pathbuf, "/dev/rdisk", 10) == 0)) {
-            strcpy(dki_info->dki_cname, "disk");
-            dki_info->dki_ctype = DKC_DIRECT;
-            dki_info->dki_partition = 0;
+			rval = sscanf(pathbuf, "/dev/r%[a-zA-Z0-9]",
+			    dki_info->dki_dname);
+		}
 
-            rval = sscanf(pathbuf, "/dev/r%[a-zA-Z0-9]",
-                          dki_info->dki_dname);
-        }
+		if (efi_debug)
+			(void) fprintf(stderr,
+			    "rval %d, name '%s' and part %d\n",
+			    rval,
+			    dki_info->dki_dname,
+			    dki_info->dki_partition);
+	}
 
-        //fprintf(stderr, "rval %d, name '%s' and part %d\n",
-        //      rval, dki_info->dki_dname,dki_info->dki_partition);
-    }
-
-#ifdef DKIOCISVIRTUAL
-    if (!ioctl(fd, DKIOCISVIRTUAL, &is_virtual) < 0) {
-        if (is_virtual) {
-            dki_info->dki_ctype = DKC_VBD;
-        }
-    }
-#endif
-
+	if (osx_device_isvirtual(dki_info->dki_dname)) {
+		dki_info->dki_ctype = DKC_VBD;
+		if (efi_debug)
+			(void) fprintf(stderr,
+			    "'%s' is virtual\n",
+			    pathbuf);
+	} else {
+		if (efi_debug)
+			(void) fprintf(stderr,
+			    "'%s' is not virtual\n",
+			    pathbuf);
+	}
 #endif
 	return (0);
 error:
@@ -332,7 +347,7 @@ efi_alloc_and_init(int fd, uint32_t nparts, struct dk_gpt **vtoc)
 	if (read_disk_info(fd, &capacity, &lbsize) != 0)
 		return (-1);
 
-    //#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 	if (efi_get_info(fd, &dki_info) != 0)
 		return (-1);
 
@@ -343,7 +358,7 @@ efi_alloc_and_init(int fd, uint32_t nparts, struct dk_gpt **vtoc)
 	    (dki_info.dki_ctype == DKC_VBD) ||
 	    (dki_info.dki_ctype == DKC_UNKNOWN))
 		return (-1);
-    //#endif
+#endif
 
 	nblocks = NBLOCKS(nparts, lbsize);
 	if ((nblocks * lbsize) < EFI_MIN_ARRAY_SIZE + lbsize) {
@@ -449,7 +464,8 @@ efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 	 */
 	if (read_disk_info(fd, &capacity, &lbsize) == -1) {
 		if (efi_debug)
-			fprintf(stderr, "unable to read disk info: %d", errno);
+			(void) fprintf(stderr, "unable to read disk info: %d",
+			    errno);
 
 		errno = EIO;
 		return (-1);
@@ -545,7 +561,6 @@ efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 		return (-1);
 	}
 #else
-
 	dk_ioc->dki_data_64 = (uint64_t)(uintptr_t)data;
 	error = ioctl(fd, cmd, (void *)dk_ioc);
 	dk_ioc->dki_data = data;
@@ -911,11 +926,11 @@ write_pmbr(int fd, struct dk_gpt *vtoc)
 	/* LINTED -- always longlong aligned */
 	dk_ioc.dki_data = (efi_gpt_t *)buf;
 	if (efi_ioctl(fd, DKIOCGETEFI, &dk_ioc) == -1) {
-		(void *) memcpy(&mb, buf, sizeof (mb));
+		(void) memcpy(&mb, buf, sizeof (mb));
 		bzero(&mb, sizeof (mb));
 		mb.signature = LE_16(MBB_MAGIC);
 	} else {
-		(void *) memcpy(&mb, buf, sizeof (mb));
+		(void) memcpy(&mb, buf, sizeof (mb));
 		if (mb.signature != LE_16(MBB_MAGIC)) {
 			bzero(&mb, sizeof (mb));
 			mb.signature = LE_16(MBB_MAGIC);
@@ -955,7 +970,7 @@ write_pmbr(int fd, struct dk_gpt *vtoc)
 		*cp++ = 0xff;
 	}
 
-	(void *) memcpy(buf, &mb, sizeof (mb));
+	(void) (void *) memcpy(buf, &mb, sizeof (mb));
 	/* LINTED -- always longlong aligned */
 	dk_ioc.dki_data = (efi_gpt_t *)buf;
 	dk_ioc.dki_lba = 0;
@@ -1540,3 +1555,124 @@ efi_auto_sense(int fd, struct dk_gpt **vtoc)
 	(*vtoc)->efi_parts[8].p_tag = V_RESERVED;
 	return (0);
 }
+
+#ifdef __APPLE__
+#include <DiskArbitration/DiskArbitration.h>
+#include <IOKit/storage/IOStorageProtocolCharacteristics.h>
+
+static const CFStringRef CoreStorageLogicalVolumeMediaPathSubstring =
+    CFSTR("CoreStoragePhysical/CoreStorageGroup");
+static const CFStringRef VirtualInterfaceDeviceProtocolSubstring =
+    CFSTR(kIOPropertyPhysicalInterconnectTypeVirtual);
+
+typedef struct {
+	DASessionRef session;
+	DADiskRef disk;
+} DADiskSession;
+
+Boolean
+CFDictionaryValueIfPresentMatchesSubstring(CFDictionaryRef dict,
+    CFStringRef key, CFStringRef substr)
+{
+	Boolean ret = false;
+	CFStringRef existing;
+	if (dict &&
+	    CFDictionaryGetValueIfPresent(dict, key,
+	        (const void **)&existing)) {
+		CFRange range = CFStringFind(existing, substr,
+		    kCFCompareCaseInsensitive);
+		if (range.location != kCFNotFound)
+			ret = true;
+	}
+	return (ret);
+}
+
+int
+setupDADiskSession(DADiskSession *ds, const char *bsdName)
+{
+	int err = 0;
+
+	ds->session = DASessionCreate(NULL);
+	if (ds->session == NULL) {
+		err = EINVAL;
+	}
+
+	if (err == 0) {
+		ds->disk = DADiskCreateFromBSDName(NULL, ds->session, bsdName);
+		if (ds->disk == NULL)
+			err = EINVAL;
+	}
+	return (err);
+}
+
+void
+teardownDADiskSession(DADiskSession *ds)
+{
+	if (ds->session != NULL)
+		CFRelease(ds->session);
+	if (ds->disk != NULL)
+		CFRelease(ds->disk);
+}
+
+
+int
+isDeviceMatchForKeyAndSubstr(char *device, CFStringRef key, CFStringRef substr,
+    Boolean *isMatch)
+{
+	int error;
+	DADiskSession ds = { 0 };
+
+	if (!isMatch)
+		return (-1);
+
+	if ((error = setupDADiskSession(&ds, device)) == 0) {
+		CFDictionaryRef descDict = NULL;
+		if((descDict = DADiskCopyDescription(ds.disk)) != NULL) {
+			*isMatch =
+			    CFDictionaryValueIfPresentMatchesSubstring(descDict,
+			        key, substr);
+		} else {
+			error = -1;
+			(void) fprintf(stderr,
+			    "no DADiskCopyDescription for device %s\n",
+			    device);
+			*isMatch = false;
+		}
+	}
+
+	teardownDADiskSession(&ds);
+	return (error);
+}
+
+/* 
+ * Caller is responsible for supplying a /dev/disk* block device path
+ * or the BSD name (disk*).
+ */
+int
+osx_device_isvirtual(char *device)
+{
+	Boolean isCoreStorageLV = false;
+	Boolean isVirtualInterface = false;
+
+	if (efi_debug)
+		(void) fprintf(stderr, "Checking if '%s' is virtual\n", device);
+
+	isDeviceMatchForKeyAndSubstr(device,
+	    kDADiskDescriptionMediaPathKey,
+	    CoreStorageLogicalVolumeMediaPathSubstring,
+	    &isCoreStorageLV);
+
+	isDeviceMatchForKeyAndSubstr(device,
+	    kDADiskDescriptionDeviceProtocolKey,
+	    VirtualInterfaceDeviceProtocolSubstring,
+	    &isVirtualInterface);
+
+	if (efi_debug)
+		(void) fprintf(stderr,
+		    "Is CoreStorage LV %d : is virtual interface %d\n",
+		    isCoreStorageLV,
+		    isVirtualInterface);
+
+	return (isCoreStorageLV || isVirtualInterface);
+}
+#endif

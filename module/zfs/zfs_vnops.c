@@ -3192,7 +3192,7 @@ zfs_setattr(vnode_t *vp, vattr_t *vap, int flags, cred_t *cr,
 	uint64_t	new_mode;
 	uint64_t	new_uid, new_gid;
 	uint64_t	xattr_obj;
-	uint64_t	mtime[2], ctime[2];
+	uint64_t	mtime[2], ctime[2], crtime[2];
 	znode_t		*attrzp;
 	int		need_policy = FALSE;
 	int		err, err2;
@@ -3202,7 +3202,7 @@ zfs_setattr(vnode_t *vp, vattr_t *vap, int flags, cred_t *cr,
 	zfs_acl_t	*aclp;
 	boolean_t skipaclchk = /*(flags & ATTR_NOACLCHECK) ? B_TRUE :*/ B_FALSE;
 	boolean_t	fuid_dirtied = B_FALSE;
-	sa_bulk_attr_t	bulk[7], xattr_bulk[7];
+	sa_bulk_attr_t	bulk[10], xattr_bulk[10];
 	int		count = 0, xattr_count = 0;
 
 	if (mask == 0)
@@ -3781,6 +3781,15 @@ top:
 		    mtime, sizeof (mtime));
 	}
 
+#ifdef __APPLE__
+    /* CTIME overloaded to mean CRTIME */
+	if (mask & AT_CTIME) {
+		ZFS_TIME_ENCODE(&vap->va_crtime, crtime);
+		SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_CRTIME(zfsvfs), NULL,
+		    crtime, sizeof (crtime));
+	}
+#endif
+
 	/* XXX - shouldn't this be done *before* the ATIME/MTIME checks? */
 	if (mask & AT_SIZE && !(mask & AT_MTIME)) {
 		SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_MTIME(zfsvfs),
@@ -3857,6 +3866,7 @@ top:
 		mutex_exit(&attrzp->z_lock);
 	}
 out:
+
 	if (err == 0 && attrzp) {
 		err2 = sa_bulk_update(attrzp->z_sa_hdl, xattr_bulk,
 		    xattr_count, tx);

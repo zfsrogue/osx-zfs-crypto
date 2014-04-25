@@ -20,9 +20,9 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
  * Copyright (c) 2013 by Delphix. All rights reserved.
  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
+ * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
  */
 
 /*
@@ -157,12 +157,6 @@ static kmutex_t		arc_reclaim_thr_lock;
 static kcondvar_t	arc_reclaim_thr_cv;	/* used to signal reclaim thr */
 static uint8_t		arc_thread_exit;
 
-#if defined (__OPPLE__) && defined(_KERNEL)
-static kmutex_t		arc_vmpressure_thr_lock;
-static kcondvar_t	arc_vmpressure_thr_cv;	/* used to signal reclaim thr */
-static uint8_t		vmpressure_thread_exit = 0;
-#endif
-
 /* number of bytes to prune from caches when at arc_meta_limit is reached */
 int zfs_arc_meta_prune = 1048576;
 
@@ -235,25 +229,41 @@ SYSCTL_QUAD(_zfs, OID_AUTO, arc_max, CTLFLAG_RW,
 SYSCTL_QUAD(_zfs, OID_AUTO, arc_min, CTLFLAG_RW,
             &zfs_arc_min, "Minimum ARC size")
 
-extern int debug_vnop_osx_printf;
+extern unsigned int debug_vnop_osx_printf;
 SYSCTL_INT(_zfs, OID_AUTO, vnop_osx_debug,
            CTLFLAG_RW, &debug_vnop_osx_printf, 0,
            "Debug printf");
-extern int zfs_vnop_ignore_negatives;
+extern unsigned int zfs_vnop_ignore_negatives;
 SYSCTL_INT(_zfs, OID_AUTO, vnop_ignore_negatives,
            CTLFLAG_RW, &zfs_vnop_ignore_negatives, 0,
            "Ignore negative cache hits");
-extern int zfs_vnop_ignore_positives;
+extern unsigned int zfs_vnop_ignore_positives;
 SYSCTL_INT(_zfs, OID_AUTO, vnop_ignore_positives,
            CTLFLAG_RW, &zfs_vnop_ignore_positives, 0,
            "Ignore positive cache hits");
-extern int zfs_vnop_create_negatives;
+extern unsigned int zfs_vnop_create_negatives;
 SYSCTL_INT(_zfs, OID_AUTO, vnop_create_negatives,
            CTLFLAG_RW, &zfs_vnop_create_negatives, 0,
            "Create negative cache entries");
 extern uint64_t vnop_num_reclaims;
 SYSCTL_QUAD(_zfs, OID_AUTO, reclaim_list, CTLFLAG_RD,
             &vnop_num_reclaims, "Num of reclaim nodes in list")
+extern unsigned int zfs_vnop_reclaim_throttle;
+SYSCTL_INT(_zfs, OID_AUTO, vnop_reclaim_throttle,
+           CTLFLAG_RW, &zfs_vnop_reclaim_throttle, 0,
+           "Throttle IO when reclaim list hits this size");
+extern unsigned int zfs_vnop_vdev_ashift;
+SYSCTL_INT(_zfs, OID_AUTO, vnop_vdev_ashift,
+           CTLFLAG_RW, &zfs_vnop_vdev_ashift, 0,
+           "Enable vdev ashift");
+extern unsigned int zfs_vfs_suspend_fs_begin_delay;
+SYSCTL_INT(_zfs, OID_AUTO, vfs_suspend_fs_begin_delay,
+           CTLFLAG_RW, &zfs_vfs_suspend_fs_begin_delay, 0,
+           "Delay at beginning of zfs_suspend_fs in seconds");
+extern unsigned zfs_vfs_suspend_fs_end_delay;
+SYSCTL_INT(_zfs, OID_AUTO, vfs_suspend_fs_end_delay,
+           CTLFLAG_RW, &zfs_vfs_suspend_fs_end_delay, 0,
+           "Delay at end of zfs_suspend_fs in seconds");
 #endif
 
 
@@ -2668,52 +2678,6 @@ arc_reclaim_needed(void)
 }
 
 
-#if defined (__OPPLE__) && defined(_KERNEL)
-extern kern_return_t mach_vm_pressure_monitor(
-         boolean_t       wait_for_pressure,
-         unsigned int    nsecs_monitored,
-         unsigned int    *pages_reclaimed_p,
-         unsigned int    *pages_wanted_p);
-static void
-arc_vmpressure_thread(void *dummy __unused)
-{
-    callb_cpr_t             cpr;
-    kern_return_t kr;
-
-    CALLB_CPR_INIT(&cpr, &arc_vmpressure_thr_lock, callb_generic_cpr, FTAG);
-
-    mutex_enter(&arc_vmpressure_thr_lock);
-    printf("arc: pressure thread is starting\n");
-
-    while (vmpressure_thread_exit == 0) {
-
-        kr = mach_vm_pressure_monitor(TRUE, 5,
-                                      NULL, NULL);
-        if (kr == KERN_SUCCESS) {
-            printf("We were signalled pressure!\n");
-        }
-
-        /* block until needed, or one second, whichever is shorter */
-        CALLB_CPR_SAFE_BEGIN(&cpr);
-        (void) cv_timedwait_interruptible(&arc_vmpressure_thr_cv,
-                                          &arc_vmpressure_thr_lock,
-                                          (ddi_get_lbolt() + hz));
-        CALLB_CPR_SAFE_END(&cpr, &arc_vmpressure_thr_lock);
-
-        printf("vmpressure heartbeat\n");
-
-    }
-
-    printf("arc: vmpressure thread exit\n");
-
-    vmpressure_thread_exit = 0;
-    cv_broadcast(&arc_vmpressure_thr_cv);
-    CALLB_CPR_EXIT(&cpr);
-    thread_exit();
-}
-#endif
-
-
 static void
 arc_reclaim_thread(void *dummy __unused)
 {
@@ -3684,6 +3648,8 @@ top:
 		vdev_t *vd = NULL;
 		uint64_t addr = 0;
 		boolean_t devw = B_FALSE;
+		enum zio_compress b_compress = ZIO_COMPRESS_OFF;
+		uint64_t b_asize = 0;
 
 		if (hdr == NULL) {
 			/* this block is not in the cache */
@@ -3753,10 +3719,12 @@ top:
 		hdr->b_acb = acb;
 		hdr->b_flags |= ARC_IO_IN_PROGRESS;
 
-		if (HDR_L2CACHE(hdr) && hdr->b_l2hdr != NULL &&
+		if (hdr->b_l2hdr != NULL &&
 		    (vd = hdr->b_l2hdr->b_dev->l2ad_vdev) != NULL) {
 			devw = hdr->b_l2hdr->b_dev->l2ad_writing;
 			addr = hdr->b_l2hdr->b_daddr;
+			b_compress = hdr->b_l2hdr->b_compress;
+			b_asize = hdr->b_l2hdr->b_asize;
 			/*
 			 * Lock out device removal.
 			 */
@@ -3805,7 +3773,7 @@ top:
 				cb->l2rcb_bp = *bp;
 				cb->l2rcb_zb = *zb;
 				cb->l2rcb_flags = zio_flags;
-				cb->l2rcb_compress = hdr->b_l2hdr->b_compress;
+				cb->l2rcb_compress = b_compress;
 
 				ASSERT(addr >= VDEV_LABEL_START_SIZE &&
 				    addr + size < vd->vdev_psize -
@@ -3817,8 +3785,7 @@ top:
 				 * Issue a null zio if the underlying buffer
 				 * was squashed to zero size by compression.
 				 */
-				if (hdr->b_l2hdr->b_compress ==
-				    ZIO_COMPRESS_EMPTY) {
+				if (b_compress == ZIO_COMPRESS_EMPTY) {
 					rzio = zio_null(pio, spa, vd,
 					    l2arc_read_done, cb,
 					    zio_flags | ZIO_FLAG_DONT_CACHE |
@@ -3827,8 +3794,8 @@ top:
 					    ZIO_FLAG_DONT_RETRY);
 				} else {
 					rzio = zio_read_phys(pio, vd, addr,
-					    hdr->b_l2hdr->b_asize,
-					    buf->b_data, ZIO_CHECKSUM_OFF,
+					    b_asize, buf->b_data,
+					    ZIO_CHECKSUM_OFF,
 					    l2arc_read_done, cb, priority,
 					    zio_flags | ZIO_FLAG_DONT_CACHE |
 					    ZIO_FLAG_CANFAIL |
@@ -3837,8 +3804,7 @@ top:
 				}
 				DTRACE_PROBE2(l2arc__read, vdev_t *, vd,
 				    zio_t *, rzio);
-				ARCSTAT_INCR(arcstat_l2_read_bytes,
-				    hdr->b_l2hdr->b_asize);
+				ARCSTAT_INCR(arcstat_l2_read_bytes, b_asize);
 
 				if (*arc_flags & ARC_NOWAIT) {
 					zio_nowait(rzio);
@@ -4082,6 +4048,7 @@ arc_release(arc_buf_t *buf, void *tag)
 	if (l2hdr) {
 		mutex_enter(&l2arc_buflist_mtx);
 		hdr->b_l2hdr = NULL;
+		list_remove(l2hdr->b_dev->l2ad_buflist, hdr);
 	}
 	buf_size = hdr->b_size;
 
@@ -4175,7 +4142,6 @@ arc_release(arc_buf_t *buf, void *tag)
 
 	if (l2hdr) {
 		ARCSTAT_INCR(arcstat_l2_asize, -l2hdr->b_asize);
-		list_remove(l2hdr->b_dev->l2ad_buflist, hdr);
 		kmem_cache_free(l2arc_hdr_cache, l2hdr);
 		arc_space_return(L2HDR_SIZE, ARC_SPACE_L2HDRS);
 		ARCSTAT_INCR(arcstat_l2_size, -buf_size);
@@ -4533,7 +4499,7 @@ arc_init(void)
 
     // We have to be a little more concervative on OSX. But those dedicating
     // to ZFS can always bring it up using sysctl.
-    arc_c_max >>= 3;
+    arc_c_max >>= 1;
     //arc_c_max >>= 3;
 
     // 2GB system, ARC at about 82329600;
@@ -4635,12 +4601,6 @@ arc_init(void)
 	(void) thread_create(NULL, 0, arc_reclaim_thread, NULL, 0, &p0,
 	    TS_RUN, minclsyspri);
 
-#if defined (__OPPLE__) && defined(_KERNEL)
-	mutex_init(&arc_vmpressure_thr_lock, NULL, MUTEX_DEFAULT, NULL);
-	cv_init(&arc_vmpressure_thr_cv, NULL, CV_DEFAULT, NULL);
-    (void) thread_create(NULL, 0, arc_vmpressure_thread, NULL, 0, &p0,
-                         TS_RUN, minclsyspri);
-#endif
 
 	arc_dead = FALSE;
 	arc_warm = B_FALSE;
@@ -4686,16 +4646,6 @@ arc_fini(void)
 		cv_wait(&arc_reclaim_thr_cv, &arc_reclaim_thr_lock);
 	mutex_exit(&arc_reclaim_thr_lock);
 
-#if defined (__OPPLE__) && defined(_KERNEL)
-    printf("Quitting vmpressure thread\n");
-	mutex_enter(&arc_vmpressure_thr_lock);
-	vmpressure_thread_exit = 1;
-	while (vmpressure_thread_exit != 0)
-		cv_wait(&arc_vmpressure_thr_cv, &arc_vmpressure_thr_lock);
-	mutex_exit(&arc_vmpressure_thr_lock);
-    printf("Quit vmpressure thread\n");
-#endif
-
 	arc_flush(NULL);
 
 	arc_dead = TRUE;
@@ -4719,10 +4669,6 @@ arc_fini(void)
 	mutex_destroy(&arc_eviction_mtx);
 	mutex_destroy(&arc_reclaim_thr_lock);
 	cv_destroy(&arc_reclaim_thr_cv);
-#if defined (__OPPLE__) && defined(_KERNEL)
-	mutex_destroy(&arc_vmpressure_thr_lock);
-	cv_destroy(&arc_vmpressure_thr_cv);
-#endif
 
 	list_destroy(&arc_mru->arcs_list[ARC_BUFC_METADATA]);
 	list_destroy(&arc_mru_ghost->arcs_list[ARC_BUFC_METADATA]);
@@ -6183,6 +6129,10 @@ void arc_register_oids(void)
     sysctl_register_oid(&sysctl__zfs_vnop_ignore_positives);
     sysctl_register_oid(&sysctl__zfs_vnop_create_negatives);
     sysctl_register_oid(&sysctl__zfs_reclaim_list);
+    sysctl_register_oid(&sysctl__zfs_vnop_reclaim_throttle);
+    sysctl_register_oid(&sysctl__zfs_vnop_vdev_ashift);
+    sysctl_register_oid(&sysctl__zfs_vfs_suspend_fs_begin_delay);
+    sysctl_register_oid(&sysctl__zfs_vfs_suspend_fs_end_delay);
 
 }
 
@@ -6223,5 +6173,9 @@ void arc_unregister_oids(void)
     sysctl_unregister_oid(&sysctl__zfs_vnop_ignore_positives);
     sysctl_unregister_oid(&sysctl__zfs_vnop_create_negatives);
     sysctl_unregister_oid(&sysctl__zfs_reclaim_list);
+    sysctl_unregister_oid(&sysctl__zfs_vnop_reclaim_throttle);
+    sysctl_unregister_oid(&sysctl__zfs_vnop_vdev_ashift);
+    sysctl_unregister_oid(&sysctl__zfs_vfs_suspend_fs_begin_delay);
+    sysctl_unregister_oid(&sysctl__zfs_vfs_suspend_fs_end_delay);
 }
 #endif

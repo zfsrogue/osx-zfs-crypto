@@ -793,26 +793,8 @@ typedef struct ddt_histogram {
 
 #define	ZVOL_PROP_NAME		"name"
 
-    /*
-     * The gpt partitioning tool in OSX has an upper limit of 4096 -
-     * Volumes of greater block size can be made to work, but we will
-     * set the default to the block size that works in most cases.
-     */
-#define	ZVOL_DEFAULT_BLOCKSIZE	4096
+#define	ZVOL_DEFAULT_BLOCKSIZE	8192
 
-#if 0
-	/*
-	 * Linux - 3/64 numbers reserved.
-	 */
-	ZFS_IOC_LINUX = ('Z' << 8) + 0x80,
-	ZFS_IOC_EVENTS_NEXT,
-	ZFS_IOC_EVENTS_CLEAR,
-
-	/*
-	 * FreeBSD - 1/64 numbers reserved.
-	 */
-	ZFS_IOC_FREEBSD = ('Z' << 8) + 0xC0,
-#endif
 
 /*
  * zvol ioctl to get dataset name
@@ -877,6 +859,7 @@ typedef enum {
 #define	ZFS_IMPORT_ANY_HOST	0x2
 #define	ZFS_IMPORT_MISSING_LOG	0x4
 #define	ZFS_IMPORT_ONLY		0x8
+#define	ZFS_IMPORT_TEMP_NAME	0x10
 
 /*
  * Sysevent payload members.  ZFS will generate the following sysevents with the

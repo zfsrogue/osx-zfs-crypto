@@ -1114,6 +1114,11 @@ spa_activate(spa_t *spa, int mode)
 
     zcrypt_keystore_init(spa);
 
+#ifdef _KERNEL
+    /* Lock kext in kernel while mounted */
+    OSKextRetainKextWithLoadTag(OSKextGetCurrentLoadTag());
+#endif
+
 }
 
 /*
@@ -1188,6 +1193,12 @@ spa_deactivate(spa_t *spa)
 		thread_join(spa->spa_did);
 		spa->spa_did = 0;
 	}
+
+#ifdef _KERNEL
+    /* Unlock kext in kernel */
+    OSKextReleaseKextWithLoadTag(OSKextGetCurrentLoadTag());
+#endif
+
 }
 
 /*
@@ -1237,6 +1248,9 @@ spa_config_parse(spa_t *spa, vdev_t **vdp, nvlist_t *nv, vdev_t *parent,
 
 	return (0);
 }
+
+boolean_t spa_exporting_vdevs = B_FALSE;
+
 
 /*
  * Opposite of spa_load().
@@ -1289,6 +1303,8 @@ spa_unload(spa_t *spa)
 	 */
 	spa_l2cache_drop(spa);
 
+    spa_exporting_vdevs = B_TRUE;
+
 	/*
 	 * Close all vdevs.
 	 */
@@ -1323,6 +1339,8 @@ spa_unload(spa_t *spa)
 		spa->spa_l2cache.sav_config = NULL;
 	}
 	spa->spa_l2cache.sav_count = 0;
+
+    spa_exporting_vdevs = B_FALSE;
 
 	spa->spa_async_suspended = 0;
 
@@ -1389,7 +1407,7 @@ spa_load_spares(spa_t *spa)
 	 * validate each vdev on the spare list.  If the vdev also exists in the
 	 * active configuration, then we also mark this vdev as an active spare.
 	 */
-	spa->spa_spares.sav_vdevs = kmem_alloc(nspares * sizeof (void *),
+	spa->spa_spares.sav_vdevs = kmem_zalloc(nspares * sizeof (void *),
 	    KM_PUSHPAGE);
 	for (i = 0; i < spa->spa_spares.sav_count; i++) {
 		VERIFY(spa_config_parse(spa, &vd, spares[i], NULL, 0,
@@ -2897,10 +2915,29 @@ spa_open_common(const char *pool, spa_t **spapp, void *tag, nvlist_t *nvpolicy,
 	 * up calling spa_open() again.  The real fix is to figure out how to
 	 * avoid dsl_dir_open() calling this in the first place.
 	 */
-	if (mutex_owner(&spa_namespace_lock) != curthread) {
-		mutex_enter(&spa_namespace_lock);
+#ifdef __APPLE__
+    /*
+     * Alas, our recursion call comes from IOKit, and is a different thread
+     */
+    if (spa_exporting_vdevs == B_TRUE) {
+        locked = B_FALSE;
+    } else {
+        if (mutex_owner(&spa_namespace_lock) != curthread) {
+            mutex_enter(&spa_namespace_lock);
+            locked = B_TRUE;
+        }
+    }
+
+#else /* !APPLE */
+
+    if (mutex_owner(&spa_namespace_lock) != curthread) {
+        mutex_enter(&spa_namespace_lock);
 		locked = B_TRUE;
 	}
+
+#endif
+
+
 
 	if ((spa = spa_lookup(pool)) == NULL) {
 		if (locked)
@@ -4057,6 +4094,9 @@ spa_import(char *pool, nvlist_t *config, nvlist_t *props, uint64_t flags)
 #ifdef _KERNEL
 	zvol_create_minors(pool);
 #endif
+
+	spa_event_notify(spa, NULL, FM_EREPORT_ZFS_POOL_IMPORT);
+
 
 	return (0);
 }

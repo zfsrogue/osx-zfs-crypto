@@ -33,6 +33,30 @@ or
  # ./configure CC=llvm-gcc CXX=llvm-g++
 ```
 
+```
+# git clone https://github.com/openzfsonosx/zfs.git
+```
+
+```
+# ./autogen.sh
+# ./configure CC=clang CXX=clang++ --with-spl=/path/to/your/spl
+# make
+
+# rsync -a --delete module/zfs/zfs.kext/ /tmp/zfs.kext/
+# chown -R root:wheel /tmp/zfs.kext
+
+# kextload -r /tmp/ -v /tmp/zfs.kext/
+
+In system log:
+: ZFS: Loading module ... 
+: ZFS: ARC limit set to (arc_c_max): 1073741824
+: kobj_open_file: "/etc/zfs/zpool.cache", err 2 from vnode_open
+: ZFS: Loaded module v0.6.2-rc1_2_g691a603, ZFS pool version 5000, ZFS filesystem version 5
+: ZFS filesystem version: 5
+: ZFS: hostid set to 9e5e1b35 from UUID 'C039E802-1F44-5F62-B3A2-5E252F3EFF2A'
+
+bash-3.2# ls -l /dev/zfs
+crw-rw-rw-  1 root  wheel   33,   0 Feb 27 17:20 /dev/zfs
 
 There are new files,
 

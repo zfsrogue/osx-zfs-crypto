@@ -131,7 +131,6 @@ zfsdev_get_soft_state(minor_t minor, enum zfs_soft_state_type which)
  * finishes.  It also protects temporary opens of the dataset so that,
  * e.g., an open doesn't get a spurious EBUSY.
  */
-extern kmutex_t zfsdev_state_lock;
 static uint32_t zvol_minors;
 
 typedef struct zvol_extent {
@@ -229,7 +228,7 @@ zvol_minor_lookup(const char *name)
 	minor_t minor;
 	zvol_state_t *zv;
 
-	ASSERT(MUTEX_HELD(&zfsdev_state_lock));
+	ASSERT(MUTEX_HELD(&spa_namespace_lock));
 
 	for (minor = 1; minor <= ZFSDEV_MAX_MINOR; minor++) {
 		zv = zfsdev_get_soft_state(minor, ZSST_ZVOL);
@@ -467,11 +466,11 @@ zvol_name2minor(const char *name, minor_t *minor)
 {
 	zvol_state_t *zv;
 
-	mutex_enter(&zfsdev_state_lock);
+	mutex_enter(&spa_namespace_lock);
 	zv = zvol_minor_lookup(name);
 	if (minor && zv)
 		*minor = zv->zv_minor;
-	mutex_exit(&zfsdev_state_lock);
+	mutex_exit(&spa_namespace_lock);
 	return (zv ? 0 : -1);
 }
 
@@ -490,10 +489,10 @@ zvol_create_minor(const char *name)
 
     dprintf("zvol_create_minor: '%s'\n", name);
 
-	mutex_enter(&zfsdev_state_lock);
+	mutex_enter(&spa_namespace_lock);
 
 	if (zvol_minor_lookup(name) != NULL) {
-		mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 		return (EEXIST);
 	}
 
@@ -507,19 +506,19 @@ zvol_create_minor(const char *name)
 	error = dmu_objset_own(name, DMU_OST_ZVOL, B_TRUE, FTAG, &os);
 
 	if (error) {
-		mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 		return (error);
 	}
 
 	if ((minor = zfsdev_minor_alloc()) == 0) {
 		dmu_objset_disown(os, FTAG);
-		mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 		return (ENXIO);
 	}
 
 	if (ddi_soft_state_zalloc(zfsdev_state, minor) != DDI_SUCCESS) {
 		dmu_objset_disown(os, FTAG);
-		mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 		return (EAGAIN);
 	}
 	(void) ddi_prop_update_string(minor, zfs_dip, ZVOL_PROP_NAME,
@@ -536,7 +535,7 @@ zvol_create_minor(const char *name)
 	    minor, DDI_PSEUDO, zfs_major) == DDI_FAILURE) {
 		ddi_soft_state_free(zfsdev_state, minor);
 		dmu_objset_disown(os, FTAG);
-		mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 		return (EAGAIN);
 	}
 
@@ -545,7 +544,7 @@ zvol_create_minor(const char *name)
 		ddi_remove_minor_node(zfs_dip, chrbuf);
 		ddi_soft_state_free(zfsdev_state, minor);
 		dmu_objset_disown(os, FTAG);
-		mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 		return (EAGAIN);
 	}
 #endif
@@ -586,7 +585,7 @@ zvol_create_minor(const char *name)
 
 	zvol_minors++;
 
-	mutex_exit(&zfsdev_state_lock);
+	mutex_exit(&spa_namespace_lock);
 
     // The iokit framework may call Open, so we can not be locked.
     zvolCreateNewDevice(zv);
@@ -616,7 +615,7 @@ zvol_remove_zv(zvol_state_t *zv)
 {
 	minor_t minor = zv->zv_minor;
 
-	ASSERT(MUTEX_HELD(&zfsdev_state_lock));
+	ASSERT(MUTEX_HELD(&spa_namespace_lock));
 	if (zv->zv_total_opens != 0)
 		return (EBUSY);
 
@@ -645,13 +644,13 @@ zvol_remove_minor(const char *name)
 	zvol_state_t *zv;
 	int rc;
 
-	mutex_enter(&zfsdev_state_lock);
+	mutex_enter(&spa_namespace_lock);
 	if ((zv = zvol_minor_lookup(name)) == NULL) {
-		mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 		return (ENXIO);
 	}
 	rc = zvol_remove_zv(zv);
-	mutex_exit(&zfsdev_state_lock);
+	mutex_exit(&spa_namespace_lock);
 	return (rc);
 }
 
@@ -666,7 +665,7 @@ __zvol_rename_minor(zvol_state_t *zv, const char *newname)
     int readonly = get_disk_ro(zv->zv_disk);
 #endif
 
-    ASSERT(MUTEX_HELD(&zvol_state_lock));
+    ASSERT(MUTEX_HELD(&spa_namespace_lock));
 
     strlcpy(zv->zv_name, newname, sizeof (zv->zv_name));
 
@@ -685,7 +684,7 @@ __zvol_rename_minor(zvol_state_t *zv, const char *newname)
 }
 #endif
 
-
+extern boolean_t spa_exporting_vdevs;
 
 int
 zvol_first_open(zvol_state_t *zv)
@@ -800,7 +799,7 @@ zvol_update_volsize(objset_t *os, uint64_t volsize)
 	dmu_tx_t *tx;
 	int error;
 
-	ASSERT(MUTEX_HELD(&zfsdev_state_lock));
+	ASSERT(MUTEX_HELD(&spa_namespace_lock));
 
 	tx = dmu_tx_create(os);
 	dmu_tx_hold_zap(tx, ZVOL_ZAP_OBJ, TRUE, NULL);
@@ -832,7 +831,7 @@ zvol_remove_minors(const char *name)
 	namebuf = kmem_zalloc(name_buf_len, KM_SLEEP);
 	(void) strncpy(namebuf, name, strlen(name));
 	(void) strlcat(namebuf, "/", name_buf_len);
-	mutex_enter(&zfsdev_state_lock);
+	mutex_enter(&spa_namespace_lock);
 	for (minor = 1; minor <= ZFSDEV_MAX_MINOR; minor++) {
 
 		zv = zfsdev_get_soft_state(minor, ZSST_ZVOL);
@@ -843,7 +842,7 @@ zvol_remove_minors(const char *name)
 	}
 	kmem_free(namebuf, strlen(name) + 2);
 
-	mutex_exit(&zfsdev_state_lock);
+	mutex_exit(&spa_namespace_lock);
 }
 
 /*
@@ -864,7 +863,7 @@ zvol_rename_minors(const char *oldname, const char *newname)
     newnamelen = strlen(newname);
     name = kmem_alloc(MAXNAMELEN, KM_PUSHPAGE);
 
-	mutex_enter(&zfsdev_state_lock);
+	mutex_enter(&spa_namespace_lock);
 
 #ifdef LINUX
     zvol_state_t *zv, *zv_next;
@@ -885,7 +884,7 @@ zvol_rename_minors(const char *oldname, const char *newname)
     }
 #endif
 
-    mutex_exit(&zfsdev_state_lock);
+    mutex_exit(&spa_namespace_lock);
 
     kmem_free(name, MAXNAMELEN);
 }
@@ -898,7 +897,7 @@ zvol_update_live_volsize(zvol_state_t *zv, uint64_t volsize)
 	uint64_t old_volsize = 0ULL;
 	int error = 0;
 
-	ASSERT(MUTEX_HELD(&zfsdev_state_lock));
+	ASSERT(MUTEX_HELD(&spa_namespace_lock));
 
 	/*
 	 * Reinitialize the dump area to the new size. If we
@@ -997,13 +996,13 @@ zvol_set_volsize(const char *name, uint64_t volsize)
 	if (readonly)
 		return (EROFS);
 
-	mutex_enter(&zfsdev_state_lock);
+	mutex_enter(&spa_namespace_lock);
 	zv = zvol_minor_lookup(name);
 
 	if (zv == NULL || zv->zv_objset == NULL) {
 		if ((error = dmu_objset_own(name, DMU_OST_ZVOL, B_FALSE,
 		    FTAG, &os)) != 0) {
-			mutex_exit(&zfsdev_state_lock);
+			mutex_exit(&spa_namespace_lock);
 			return (error);
 		}
 		owned = B_TRUE;
@@ -1027,7 +1026,7 @@ out:
 		if (zv != NULL)
 			zv->zv_objset = NULL;
 	}
-	mutex_exit(&zfsdev_state_lock);
+	mutex_exit(&spa_namespace_lock);
 	return (error);
 }
 
@@ -1036,14 +1035,18 @@ int
 zvol_open_impl(zvol_state_t *zv, int flag, int otyp, struct proc *p)
 {
 	int err = 0;
+    int locked = 1;
 
-	mutex_enter(&zfsdev_state_lock);
+    //if (mutex_owner(&spa_namespace_lock))
+    //  locked = 0;
+    //else
+    //  mutex_enter(&spa_namespace_lock);
 
 	if (zv->zv_total_opens == 0)
 		err = zvol_first_open(zv);
 
 	if (err) {
-		mutex_exit(&zfsdev_state_lock);
+        //	if (locked) mutex_exit(&spa_namespace_lock);
 		return (err);
 	}
 	if ((flag & FWRITE) && (zv->zv_flags & ZVOL_RDONLY)) {
@@ -1071,14 +1074,14 @@ zvol_open_impl(zvol_state_t *zv, int flag, int otyp, struct proc *p)
 #endif
     zv->zv_total_opens++;
 
-	mutex_exit(&zfsdev_state_lock);
+    //	if (locked) mutex_exit(&spa_namespace_lock);
 
     dprintf("zol_open()->%d\n", err);
 	return (err);
 out:
 	if (zv->zv_total_opens == 0)
 		zvol_last_close(zv);
-	mutex_exit(&zfsdev_state_lock);
+	//if (locked) mutex_exit(&spa_namespace_lock);
     dprintf("zol_open(x)->%d\n", err);
 	return (err);
 }
@@ -1096,16 +1099,16 @@ zvol_open(dev_t devp, int flag, int otyp, struct proc *p)
 
     dprintf("zvol_open: minor %d\n", getminor(devp));
 
-	mutex_enter(&zfsdev_state_lock);
+	mutex_enter(&spa_namespace_lock);
 
 	zv = zfsdev_get_soft_state(getminor(devp), ZSST_ZVOL);
 	if (zv == NULL) {
         dprintf("zv is NULL\n");
-		mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 		return (ENXIO);
 	}
 
-    mutex_exit(&zfsdev_state_lock); // Is there a race here?
+    mutex_exit(&spa_namespace_lock); // Is there a race here?
 
     return zvol_open_impl(zv, flag, otyp, p);
 }
@@ -1117,8 +1120,12 @@ int
 zvol_close_impl(zvol_state_t *zv, int flag, int otyp, struct proc *p)
 {
 	int error = 0;
+    int locked = 1;
 
-	mutex_enter(&zfsdev_state_lock);
+    //if (mutex_owner(&spa_namespace_lock))
+    //    locked = 0;
+    //else
+    //    mutex_enter(&spa_namespace_lock);
 
     dprintf("zvol_close_impl\n");
 
@@ -1144,7 +1151,7 @@ zvol_close_impl(zvol_state_t *zv, int flag, int otyp, struct proc *p)
 	if (zv->zv_total_opens == 0)
 		zvol_last_close(zv);
 
-	mutex_exit(&zfsdev_state_lock);
+	//if (locked) mutex_exit(&spa_namespace_lock);
 	return (error);
 }
 
@@ -1160,15 +1167,15 @@ zvol_close(dev_t dev, int flag, int otyp, struct proc *p)
 
     dprintf("zvol_close(%d)\n", getminor(dev));
 
-	mutex_enter(&zfsdev_state_lock);
+	mutex_enter(&spa_namespace_lock);
 
 	zv = zfsdev_get_soft_state(minor, ZSST_ZVOL);
 	if (zv == NULL) {
-		mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 		return (ENXIO);
 	}
 
-    mutex_exit(&zfsdev_state_lock); // Is there a race here..
+    mutex_exit(&spa_namespace_lock); // Is there a race here..
     return zvol_close_impl(zv, flag, otyp, p);
 }
 
@@ -1940,16 +1947,16 @@ zvol_get_volume_size(dev_t dev)
     // Minor 0 is the /dev/zfs control, not zvol.
     if (!getminor(dev)) return ENXIO;
 
-	mutex_enter(&zfsdev_state_lock);
+	mutex_enter(&spa_namespace_lock);
 
 	zv = zfsdev_get_soft_state(getminor(dev), ZSST_ZVOL);
 	if (zv == NULL) {
         dprintf("zv is NULL\n");
-		mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 		return (ENXIO);
 	}
 
-    mutex_exit(&zfsdev_state_lock);
+    mutex_exit(&spa_namespace_lock);
 	return (zv->zv_volsize / zv->zv_volblocksize);
 }
 
@@ -1963,18 +1970,18 @@ zvol_get_volume_blocksize(dev_t dev)
     // Minor 0 is the /dev/zfs control, not zvol.
     if (!getminor(dev)) return ENXIO;
 
-	mutex_enter(&zfsdev_state_lock);
+	mutex_enter(&spa_namespace_lock);
 
 	zv = zfsdev_get_soft_state(getminor(dev), ZSST_ZVOL);
 	if (zv == NULL) {
         dprintf("zv is NULL\n");
-		mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 		return (ENXIO);
 	}
 
     dprintf("zvol_get_volume_blocksize: %d\n",zv->zv_volblocksize );
 
-    mutex_exit(&zfsdev_state_lock);
+    mutex_exit(&spa_namespace_lock);
 	//return (zv->zv_volblocksize);
 	return (512);
 }
@@ -2047,12 +2054,12 @@ zvol_ioctl(dev_t dev, unsigned long cmd, caddr_t data, int isblk, cred_t *cr, in
 
     if (!getminor(dev)) return ENXIO;
 
-	mutex_enter(&zfsdev_state_lock);
+	mutex_enter(&spa_namespace_lock);
 
 	zv = zfsdev_get_soft_state(getminor(dev), ZSST_ZVOL);
 	if (zv == NULL) {
         dprintf("zv is NULL\n");
-		mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 		return (ENXIO);
 	}
 
@@ -2184,7 +2191,7 @@ zvol_ioctl(dev_t dev, unsigned long cmd, caddr_t data, int isblk, cred_t *cr, in
     }
 
 
-    mutex_exit(&zfsdev_state_lock);
+    mutex_exit(&spa_namespace_lock);
     dprintf("zvol_ioctl returning %d\n", error);
     return(error);
 
@@ -2197,12 +2204,12 @@ zvol_ioctl(dev_t dev, unsigned long cmd, caddr_t data, int isblk, cred_t *cr, in
 	int error = 0;
 	rl_t *rl;
 
-	mutex_enter(&zfsdev_state_lock);
+	mutex_enter(&spa_namespace_lock);
 
 	zv = zfsdev_get_soft_state(getminor(dev), ZSST_ZVOL);
 
 	if (zv == NULL) {
-		mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 		return (ENXIO);
 	}
 	ASSERT(zv->zv_total_opens > 0);
@@ -2216,7 +2223,7 @@ zvol_ioctl(dev_t dev, unsigned long cmd, caddr_t data, int isblk, cred_t *cr, in
 		dki.dki_ctype = DKC_UNKNOWN;
 		dki.dki_unit = getminor(dev);
 		dki.dki_maxtransfer = 1 << (SPA_MAXBLOCKSHIFT - zv->zv_min_bs);
-		mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 		if (ddi_copyout(&dki, (void *)arg, sizeof (dki), flag))
 			error = EFAULT;
 		return (error);
@@ -2226,7 +2233,7 @@ zvol_ioctl(dev_t dev, unsigned long cmd, caddr_t data, int isblk, cred_t *cr, in
 		dkm.dki_lbsize = 1U << zv->zv_min_bs;
 		dkm.dki_capacity = zv->zv_volsize >> zv->zv_min_bs;
 		dkm.dki_media_type = DK_UNKNOWN;
-		mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 		if (ddi_copyout(&dkm, (void *)arg, sizeof (dkm), flag))
 			error = EFAULT;
 		return (error);
@@ -2236,14 +2243,14 @@ zvol_ioctl(dev_t dev, unsigned long cmd, caddr_t data, int isblk, cred_t *cr, in
 			uint64_t vs = zv->zv_volsize;
 			uint8_t bs = zv->zv_min_bs;
 
-			mutex_exit(&zfsdev_state_lock);
+			mutex_exit(&spa_namespace_lock);
 			error = zvol_getefi((void *)arg, flag, vs, bs);
 			return (error);
 		}
 
 	case DKIOCFLUSHWRITECACHE:
 		dkc = (struct dk_callback *)arg;
-		mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 		zil_commit(zv->zv_zilog, ZVOL_OBJ);
 		if ((flag & FKIOCTL) && dkc != NULL && dkc->dkc_callback) {
 			(*dkc->dkc_callback)(dkc->dkc_cookie, error);
@@ -2269,10 +2276,10 @@ zvol_ioctl(dev_t dev, unsigned long cmd, caddr_t data, int isblk, cred_t *cr, in
 			}
 			if (wce) {
 				zv->zv_flags |= ZVOL_WCE;
-				mutex_exit(&zfsdev_state_lock);
+				mutex_exit(&spa_namespace_lock);
 			} else {
 				zv->zv_flags &= ~ZVOL_WCE;
-				mutex_exit(&zfsdev_state_lock);
+				mutex_exit(&spa_namespace_lock);
 				zil_commit(zv->zv_zilog, ZVOL_OBJ);
 			}
 			return (0);
@@ -2367,7 +2374,7 @@ zvol_ioctl(dev_t dev, unsigned long cmd, caddr_t data, int isblk, cred_t *cr, in
 		break;
 
 	}
-	mutex_exit(&zfsdev_state_lock);
+	mutex_exit(&spa_namespace_lock);
 	return (error);
 #endif
     return ENOTSUP;
@@ -2407,7 +2414,7 @@ zvol_dump_init(zvol_state_t *zv, boolean_t resize)
 	nvlist_t *nv = NULL;
 	uint64_t version = spa_version(dmu_objset_spa(zv->zv_objset));
 
-	ASSERT(MUTEX_HELD(&zfsdev_state_lock));
+	ASSERT(MUTEX_HELD(&spa_namespace_lock));
 	error = dmu_free_long_range(zv->zv_objset, ZVOL_OBJ, 0,
 	    DMU_OBJECT_END);
 	/* wait for dmu_free_long_range to actually free the blocks */
@@ -2641,8 +2648,8 @@ zvol_create_minors(const char *name)
     char *osname, *p;
     int error, len;
 
-    //if (dataset_name_hidden(name))
-    //   return (0);
+    if (dataset_name_hidden(name))
+        return (0);
 
     if ((error = dmu_objset_hold(name, FTAG, &os)) != 0) {
         printf("ZFS WARNING: Unable to put hold on %s (error=%d).\n",
@@ -2707,235 +2714,6 @@ zvol_create_minors(const char *name)
 
 
 
-/*
- * Attempt to create new directories starting from "root" (will not be created)
- * handling all sub directory creations required
- */
-int zvol_mkdir_path(char *root, char *newdirs)
-{
-    // zvol_mkdir_path("/var/run" "zfs/zvol/dsk" will assume /var/run should
-    // already exist, and if not, fail. Then create zfs/ zfs/zvol/ as needed.
-    int error;
-    vfs_context_t vctx;
-    struct vnode *dvp, *vp;
-    struct componentname cn;
-    struct vnode_attr vap;
-    char *current_directory = NULL, *r;
-
-    //IOLog("zvol_mkdir_path: checking '%s' exists: to make '%s'\n",
-    //    root, newdirs);
-
-    vctx = vfs_context_create((vfs_context_t)0);
-
-    error = vnode_lookup(root, 0, &dvp, vctx);
-
-    if ( error ) {
-        vfs_context_rele(vctx);
-        return ENOENT;
-    }
-
-    // Now, build up the paths in "newdirs" and create as required.
-
-    // 'newdirs' should not start with "/", skip them now.
-    while(*newdirs == '/') newdirs++;
-
-    current_directory = newdirs;
-
-    bzero(&cn, sizeof(cn));
-    // We make it be the fullname, and use the cn_namelen to lookup parts
-    cn.cn_nameiop = LOOKUP;
-    cn.cn_flags = FOLLOW;
-    cn.cn_pnbuf = current_directory;
-    cn.cn_pnlen = sizeof(current_directory);
-    cn.cn_nameptr = cn.cn_pnbuf;
-    cn.cn_namelen = strlen(current_directory);
-
-    r = NULL;
-
-    // We run through this once, even if there is no slash.
-    do {
-
-        //IOLog("Assigning '%s'\n", current_directory);
-
-        cn.cn_pnbuf = current_directory;
-        cn.cn_nameptr = cn.cn_pnbuf;
-        cn.cn_namelen = strlen(current_directory);
-
-        r = strchr(current_directory, '/');
-        if (r) { // partial
-            cn.cn_namelen = r - current_directory;
-        }
-
-        //IOLog("Working on the '%*.*s' part.\n",
-        //    cn.cn_namelen, cn.cn_namelen, cn.cn_nameptr);
-
-        // Check if it exists
-        vp = NULL;
-        error = VOP_LOOKUP(dvp, &vp, &cn, vctx);
-
-        if (!error) {
-            // It exists!
-            //IOLog("'%*.*s' exists!\n", cn.cn_namelen, cn.cn_namelen,
-            //    cn.cn_nameptr);
-        } else {
-            // Does not exist, mkdir it.
-
-            //IOLog("mkdir '%*.*s'\n", cn.cn_namelen, cn.cn_namelen,
-            //    cn.cn_nameptr);
-
-            VATTR_INIT(&vap);
-            VATTR_SET(&vap, va_type, VDIR);
-            VATTR_SET(&vap, va_uid, 0);
-            VATTR_SET(&vap, va_gid, 0);
-            VATTR_SET(&vap, va_mode, S_IRUSR | S_IXUSR | S_IWUSR |
-                      S_IRGRP | S_IXGRP |
-                      S_IROTH | S_IXOTH);
-
-            error = vnode_authorize(dvp, NULL, KAUTH_VNODE_ADD_SUBDIRECTORY,
-                                    vctx);
-            //IOLog("vnode_auth %d\n", error);
-            if (!error) error = vnode_authattr_new(dvp, &vap, 0, vctx);
-            //  IOLog("vnode_authattr %d\n", error);
-
-            vp = NULL;
-            if (!error) error = VOP_MKDIR(dvp, &vp, &cn, &vap, vctx);
-
-            if (error) {
-                //IOLog("Failed to create '%s' in directory '%s': %d\n",
-                //      cn.cn_nameptr, current_directory, error);
-                break;
-            }
-
-        } // !LOOKUP
-
-        // Release previous parent directory, and assign this to be dvp
-        vnode_put(dvp);
-        dvp = vp;
-
-        //  IOLog("dvp is now %p\n", dvp);
-        if (!dvp) break;
-        // Update the current dir, if there is "dir//dir" skip additional
-        // slashes.
-        while(r && (*r == '/')) r++;
-
-        current_directory = r;
-
-    } while(current_directory && *current_directory);
-
-    if (dvp)
-        vnode_put(dvp);
-    vfs_context_rele(vctx);
-    return 0;
-}
-
-int zvol_symlink(char *root, char *existing_target, char *create_target)
-{
-
-    int error;
-    vfs_context_t vctx;
-    struct vnode *vp, *dvp;
-    struct componentname cn;
-    struct vnode_attr vap;
-
-    //IOLog("Trying to make symlink for '%s/%s' -> '%s'\n",
-    //    root, create_target, existing_target);
-
-    vctx = vfs_context_create((vfs_context_t)0);
-
-    error = vnode_lookup(root, 0, &dvp, vctx);
-
-    if ( error ) {
-        //  IOLog("No root\n");
-        vfs_context_rele(vctx);
-        return ENOENT;
-    }
-
-    bzero(&cn, sizeof(cn));
-    cn.cn_nameiop = LOOKUP;
-    cn.cn_flags = FOLLOW;
-    cn.cn_pnbuf = create_target;
-    cn.cn_pnlen = sizeof(create_target);
-    cn.cn_nameptr = cn.cn_pnbuf;
-    cn.cn_namelen = strlen(create_target);
-
-    //error = vnode_authattr_new(vp, &vap, 0, vctx);
-    VATTR_INIT(&vap);
-    VATTR_SET(&vap, va_type, VLNK);
-    VATTR_SET(&vap, va_uid, 0);
-    VATTR_SET(&vap, va_gid, 0);
-    VATTR_SET(&vap, va_mode, S_IRUSR | S_IXUSR | S_IWUSR |
-              S_IRGRP | S_IXGRP |
-              S_IROTH | S_IXOTH);
-
-    error = vnode_authorize(dvp, NULL, KAUTH_VNODE_ADD_FILE, vctx);
-    //IOLog("vnode_auth %d\n", error);
-    if (!error) error = vnode_authattr_new(dvp, &vap, 0, vctx);
-    //IOLog("vnode_authattr %d\n", error);
-    if (!error) error = VOP_SYMLINK(dvp, &vp,&cn, &vap, existing_target,vctx);
-
-    //IOLog("Symlink creation said %d vp %p\n", error, vp);
-
-    if (!error)
-        vnode_put(vp);
-    vfs_context_rele(vctx);
-    vnode_put(dvp);
-    return error;
-
-}
-
-/*
- * Delete a file. 'root' is the directory it should be in, and
- * 'target' is just the filename.
- */
-int zvol_unlink(char *root, char *target)
-{
-    int error;
-    vfs_context_t vctx;
-    struct vnode *vp, *dvp;
-    struct componentname cn;
-
-    //IOLog("Trying to delete '%s' inside directory '%s'\n",
-    //    root, target);
-
-    vctx = vfs_context_create((vfs_context_t)0);
-
-    error = vnode_lookup(root, 0, &dvp, vctx);
-
-    if ( error ) {
-        //  IOLog("No root\n");
-        vfs_context_rele(vctx);
-        return ENOENT;
-    }
-
-    // Get the file's vp
-    bzero(&cn, sizeof(cn));
-    cn.cn_nameiop = DELETE;
-    cn.cn_flags = FOLLOW;
-    cn.cn_pnbuf = target;
-    cn.cn_pnlen = sizeof(target);
-    cn.cn_nameptr = cn.cn_pnbuf;
-    cn.cn_namelen = strlen(target);
-
-    vp = NULL;
-    error = VOP_LOOKUP(dvp, &vp, &cn, vctx);
-    if (error)
-        goto out;
-
-    error = VOP_REMOVE(dvp, vp, &cn, 0, vctx);
-
-    //IOLog("Remove said %d vp %p\n", error, vp);
-
-    // LOOKUP succeeded, even if REMOVE might fail, we release vp
-    vnode_put(vp);
-
- out:
-    vfs_context_rele(vctx);
-    vnode_put(dvp);
-
-    return error;
-}
-
-
 
 /*
  * Due to OS X limitations in /dev, we create a symlink for "/dev/zvol" to
@@ -2954,89 +2732,15 @@ int zvol_unlink(char *root, char *target)
 
 void zvol_add_symlink(zvol_state_t *zv, const char *bsd_disk, const char *bsd_rdisk)
 {
-
-    char path[MAXPATHLEN];
-    char rpath[MAXPATHLEN];
-    char bsdname[MAXPATHLEN];
-    char *copy, *r;
-
-    // Alas, zv_name is "pool/name".
-    if (!zv) return;
-
-    copy = spa_strdup(zv->zv_name);
-    if (!copy) return;
-
-    if ((r = strrchr(copy, '/'))) {
-        *r = 0;
-        r++;
-        snprintf(path, sizeof(path),
-                 "%s/zfs/zvol/dsk/%s", ZVOL_ROOT, copy);
-        snprintf(rpath, sizeof(rpath),
-                 "%s/zfs/zvol/rdsk/%s", ZVOL_ROOT, copy);
-    } else {
-        snprintf(path, sizeof(path),
-                 "%s/zfs/zvol/dsk", ZVOL_ROOT);
-        snprintf(rpath, sizeof(rpath),
-                 "%s/zfs/zvol/rdsk", ZVOL_ROOT);
-    }
-
-    zvol_mkdir_path(ZVOL_ROOT,  &path[strlen(ZVOL_ROOT)+1]);
-    zvol_mkdir_path(ZVOL_ROOT, &rpath[strlen(ZVOL_ROOT)+1]);
-
-    // Create symlink
-    if (!r) r = copy;
-
-    snprintf(bsdname, sizeof(bsdname), "/dev/%s", bsd_disk);
-
-    // Delete it first, to make sure it is always correct
-    zvol_unlink(path, r);
-
-    // Create symlink
-    zvol_symlink(path, bsdname, r);
-
-    snprintf(bsdname, sizeof(bsdname), "/dev/%s", bsd_rdisk);
-
-    // Delete it first, to make sure it is always correct
-    zvol_unlink(rpath, r);
-
-    // Create symlink
-    zvol_symlink(rpath, bsdname, r);
-
-    spa_strfree(copy);
-
+    zfs_ereport_zvol_post(FM_EREPORT_ZVOL_CREATE_SYMLINK,
+                              zv->zv_name, bsd_disk, bsd_rdisk);
 }
 
 
 void zvol_remove_symlink(zvol_state_t *zv)
 {
-    char path[MAXPATHLEN];
-    char rpath[MAXPATHLEN];
-    char *copy, *r;
+    if (!zv || !zv->zv_name) return;
 
-    if (!zv) return;
-
-    copy = spa_strdup(zv->zv_name);
-    if (!copy) return;
-
-    if ((r = strrchr(copy, '/'))) {
-        *r = 0;
-        r++;
-        snprintf(path, sizeof(path),
-                 "%s/zfs/zvol/dsk/%s", ZVOL_ROOT, copy);
-        snprintf(rpath, sizeof(rpath),
-                 "%s/zfs/zvol/rdsk/%s", ZVOL_ROOT, copy);
-    } else {
-        snprintf(path, sizeof(path),
-                 "%s/zfs/zvol/dsk", ZVOL_ROOT);
-        snprintf(rpath, sizeof(rpath),
-                 "%s/zfs/zvol/rdsk", ZVOL_ROOT);
-    }
-
-    // Create symlink
-    if (!r) r = copy;
-
-    zvol_unlink(path, r);
-    zvol_unlink(rpath, r);
-
-    spa_strfree(copy);
+    zfs_ereport_zvol_post(FM_EREPORT_ZVOL_REMOVE_SYMLINK,
+                          zv->zv_name, NULL, NULL);
 }

@@ -1802,6 +1802,15 @@ zfs_prop_inherit(zfs_handle_t *zhp, const char *propname, boolean_t received)
 		 * Refresh the statistics so the new property is reflected.
 		 */
 		(void) get_stats(zhp);
+
+		/*
+		 * Remount the filesystem to propagate the change
+		 * if one of the options handled by the generic
+		 * Linux namespace layer has been modified.
+		 */
+		if (zfs_is_namespace_prop(prop) &&
+		    zfs_is_mounted(zhp, NULL))
+			ret = zfs_mount(zhp, MNTOPT_REMOUNT, 0);
 	}
 
 error:
@@ -2396,7 +2405,7 @@ zfs_prop_get(zfs_handle_t *zhp, zfs_prop_t prop, char *propbuf, size_t proplen,
 					size_t len = secondhalf - relpath;
 					if (len > 0) {
 						char *firsthalf =
-						    (char *)malloc(len);
+						    (char *)malloc(len+1);
 						memcpy(firsthalf, relpath, len);
 						firsthalf[len] = '\0';
 						(void) snprintf(propbuf,
