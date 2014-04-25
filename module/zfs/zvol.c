@@ -498,7 +498,7 @@ zvol_create_minor(const char *name)
 
 	error = dsl_crypto_key_inherit(name);
 	if (error != 0 && error != EEXIST) {
-	  mutex_exit(&zfsdev_state_lock);
+		mutex_exit(&spa_namespace_lock);
 	  return (error);
 	}
 
