@@ -114,6 +114,7 @@ zfs_prop_init(void)
 		{ NULL }
 	};
 
+#ifdef __LINUX__
 	static zprop_index_t acltype_table[] = {
 		{ "off",	ZFS_ACLTYPE_OFF },
 		{ "disabled",	ZFS_ACLTYPE_OFF },
@@ -121,6 +122,7 @@ zfs_prop_init(void)
 		{ "posixacl",	ZFS_ACLTYPE_POSIXACL },
 		{ NULL }
 	};
+#endif
 
 	static zprop_index_t acl_inherit_table[] = {
 		{ "discard",	ZFS_ACL_DISCARD },

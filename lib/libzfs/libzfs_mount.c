@@ -422,13 +422,6 @@ zfs_add_options(zfs_handle_t *zhp, int *flags)
 	return (error);
 }
 
-
-#define MOUNT_POINT_CUSTOM_ICON ".VolumeIcon.icns"
-// RJVB 20140331: now that we use KERNEL_MODPREFIX it is no longer necessary to look in 2 locations:
-// #define CUSTOM_ICON_PATH_LEGACY "/System/Library/Extensions/zfs.kext/Contents/Resources/VolumeIcon.icns"
-// #define CUSTOM_ICON_PATH_MAVERICKS "/Library/Extensions/zfs.kext/Contents/Resources/VolumeIcon.icns"
-#define CUSTOM_ICON_PATH KERNEL_MODPREFIX "/zfs.kext/Contents/Resources/VolumeIcon.icns"
-
 #ifdef __APPLE__
 /*
  * On OSX we can set the icon to an Open ZFS specific one, just to be extra
@@ -532,6 +525,8 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 		flags |= MNT_RDONLY;
 #endif
 
+	if (!zfs_is_mountable(zhp, mountpoint, sizeof (mountpoint), NULL))
+		return (0);
 
     /*
      * Load encryption key if required and not already present.
@@ -564,12 +559,13 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 	 */
 	//strlcat(mntopts, "," MNTOPT_ZFSUTIL, sizeof (mntopts));
 
-	if (!zfs_is_mountable(zhp, mountpoint, sizeof (mountpoint), NULL)) {
-		return (0);
-	}
-
 	/* Create the directory if it doesn't already exist */
+#ifdef __APPLE__
+	if (zfs_get_type(zhp) != ZFS_TYPE_SNAPSHOT &&
+	    lstat(mountpoint, &buf) != 0) {
+#else
 	if (lstat(mountpoint, &buf) != 0) {
+#endif
 		char path[MAXPATHLEN];
 		FILE *fp;
 
@@ -609,11 +605,12 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 #if LINUX
 	rc = do_mount(zfs_get_name(zhp), mountpoint, mntopts);
 #else
-    //printf("zfs_mount: un used options: \"%s\"\n", mntopts);
-    //fprintf(stderr, "zfs_mount: flags are %04x \n", flags);
-    mnt_args.fspec = zfs_get_name(zhp);
-    mnt_args.flags = flags;
-    rc = mount(MNTTYPE_ZFS, mountpoint, flags, &mnt_args);
+	//printf("zfs_mount: un used options: \"%s\"\n", mntopts);
+	//fprintf(stderr, "zfs_mount: flags are %04x \n", flags);
+	mnt_args.fspec = zfs_get_name(zhp);
+	mnt_args.flags = flags;
+	if ((rc = mount(MNTTYPE_ZFS, mountpoint, flags, &mnt_args)) == -1)
+		rc = errno;
 #endif
 
 	if (rc) {
@@ -640,6 +637,13 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 			    (u_longlong_t)zfs_prop_get_int(zhp,
 			    ZFS_PROP_VERSION), spa_version);
 			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, buf));
+#ifdef __APPLE__
+		} else if (((rc == ESRCH) || (rc == EINVAL) ||
+		    (rc == ENOENT && lstat(mountpoint, &buf) != 0)) &&
+		    zfs_get_type(zhp) == ZFS_TYPE_SNAPSHOT) {
+			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+			    "The parent file system must be mounted first."));
+#endif
 		} else {
 			zfs_error_aux(hdl, strerror(rc));
 		}
@@ -652,7 +656,8 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 	if (zhp->zfs_type == ZFS_TYPE_SNAPSHOT)
 		fprintf(stderr, "ZFS: snapshot mountpoint '%s'\n", mountpoint);
 
-    zfs_mount_seticon(mountpoint);
+	if (!(flags & MNT_RDONLY))
+		zfs_mount_seticon(mountpoint);
 #endif
 
 	/* remove the mounted entry before re-adding on remount */
@@ -1378,7 +1383,7 @@ int zpool_disable_volumes(zfs_handle_t *nzhp, void *data)
             printf("Attempting to eject volume '%s'\n",
                    zfs_get_name(nzhp));
             // /var/run/zfs/zvol/dsk/$POOL/$volume
-            volume = zfs_asprintf(nzhp,
+            volume = zfs_asprintf(nzhp->zfs_hdl,
                                   "%s/zfs/zvol/dsk/%s",
                                   ZVOL_ROOT, zfs_get_name(nzhp));
             if (volume) {

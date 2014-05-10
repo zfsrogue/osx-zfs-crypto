@@ -1167,6 +1167,7 @@ struct process_old_arg {
 	uint64_t used, comp, uncomp;
 };
 
+#ifdef __LINUX__
 static int
 process_old_cb(void *arg, const blkptr_t *bp, dmu_tx_t *tx)
 {
@@ -1189,7 +1190,9 @@ process_old_cb(void *arg, const blkptr_t *bp, dmu_tx_t *tx)
 	}
 	return (0);
 }
+#endif
 
+#ifdef __LINUX__
 static void
 process_old_deadlist(dsl_dataset_t *ds, dsl_dataset_t *ds_prev,
     dsl_dataset_t *ds_next, boolean_t after_branch_point, dmu_tx_t *tx)
@@ -1223,7 +1226,7 @@ process_old_deadlist(dsl_dataset_t *ds, dsl_dataset_t *ds_prev,
 	dsl_deadlist_open(&ds_next->ds_deadlist, mos,
 	    ds_next->ds_phys->ds_deadlist_obj);
 }
-
+#endif
 
 
 static void
@@ -1731,7 +1734,7 @@ dsl_dataset_rename_snapshot_sync_impl(dsl_pool_t *dp,
 
 	VERIFY0(dsl_dataset_snap_remove(hds, ddrsa->ddrsa_oldsnapname, tx));
 	mutex_enter(&ds->ds_lock);
-	(void) strcpy(ds->ds_snapname, ddrsa->ddrsa_newsnapname);
+	(void) strlcpy(ds->ds_snapname, ddrsa->ddrsa_newsnapname, MAXNAMELEN);
 	mutex_exit(&ds->ds_lock);
 	VERIFY0(zap_add(dp->dp_meta_objset, hds->ds_phys->ds_snapnames_zapobj,
 	    ds->ds_snapname, 8, 1, &ds->ds_object, tx));

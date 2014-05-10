@@ -85,12 +85,12 @@
 #include <sys/mkdev.h>
 #include <sys/modctl.h>
 #include <sys/refstr.h>
-#include <sys/zfs_ioctl.h>
 #include <sys/zfs_ctldir.h>
 #include <sys/bootconf.h>
 #include <sys/sunddi.h>
 #include <sys/dnlc.h>
 #endif /* !__APPLE__ */
+#include <sys/zfs_ioctl.h>
 #include <sys/dmu_objset.h>
 #include <sys/spa_boot.h>
 #include <sys/zpl.h>
@@ -108,6 +108,7 @@ unsigned int zfs_vfs_suspend_fs_end_delay = 2;
 
 int  zfs_module_start(kmod_info_t *ki, void *data);
 int  zfs_module_stop(kmod_info_t *ki, void *data);
+extern int getzfsvfs(const char *dsname, zfsvfs_t **zfvp);
 
 
 // move these structs to _osx once wrappers are updated
@@ -579,6 +580,7 @@ snapdir_changed_cb(void *arg, uint64_t newval)
 {
 	zfsvfs_t *zfsvfs = arg;
 	zfsvfs->z_show_ctldir = newval;
+    dnlc_purge_vfsp(zfsvfs->z_vfs, 0);
 }
 
 static void
@@ -1551,6 +1553,22 @@ zfs_domount(struct mount *vfsp, dev_t mount_dev, char *osname, vfs_context_t ctx
 
 	if (dmu_objset_is_snapshot(zfsvfs->z_os)) {
 		uint64_t pval;
+		char fsname[MAXNAMELEN];
+		zfsvfs_t *fs_zfsvfs;
+
+		dmu_fsname(osname, fsname);
+		error = getzfsvfs(fsname, &fs_zfsvfs);
+		if (error == 0) {
+			if (fs_zfsvfs->z_unmounted)
+				error = SET_ERROR(EINVAL);
+			VFS_RELE(fs_zfsvfs->z_vfs);
+		}
+		if (error) {
+			printf("file system '%s' is unmounted : error %d\n",
+			    fsname,
+			    error);
+			goto out;
+		}
 
         vfs_setflags(vfsp, (u_int64_t)((unsigned int)MNT_AUTOMOUNTED));
 
@@ -1565,6 +1583,7 @@ zfs_domount(struct mount *vfsp, dev_t mount_dev, char *osname, vfs_context_t ctx
 		mutex_enter(&zfsvfs->z_os->os_user_ptr_lock);
 		dmu_objset_set_user(zfsvfs->z_os, zfsvfs);
 		mutex_exit(&zfsvfs->z_os->os_user_ptr_lock);
+
 	} else {
 		error = zfsvfs_setup(zfsvfs, B_TRUE);
 	}
@@ -1580,8 +1599,9 @@ zfs_domount(struct mount *vfsp, dev_t mount_dev, char *osname, vfs_context_t ctx
 #endif
 
 #if 1 // Want .zfs or not
-	if (!zfsvfs->z_issnap)
+	if (!zfsvfs->z_issnap) {
 		zfsctl_create(zfsvfs);
+    }
 #endif
 out:
 	if (error) {
@@ -2605,7 +2625,6 @@ zfs_vfs_unmount(struct mount *mp, int mntflags, vfs_context_t context)
 		}
         dprintf("z_ctldir destroy\n");
 		zfsctl_destroy(zfsvfs);
-        dprintf("z_ctldir destroy done\n");
 		ASSERT(zfsvfs->z_ctldir == NULL);
 	}
 

@@ -749,7 +749,7 @@ zfs_znode_alloc(zfsvfs_t *zfsvfs, dmu_buf_t *db, int blksz,
 		zfs_vnode_forget(vp);
 		zp->z_vnode = NULL;
 		kmem_cache_free(znode_cache, zp);
-        printf("znode_alloc: sa_bulk_lookup failed - aborting\n");
+        dprintf("znode_alloc: sa_bulk_lookup failed - aborting\n");
 		return (NULL);
 	}
 
@@ -1303,7 +1303,7 @@ again:
                   mutex_exit(&zp->z_lock);
                   sa_buf_rele(db, NULL);
                   ZFS_OBJ_HOLD_EXIT(zfsvfs, obj_num);
-                  printf("zfs: woah vnode_getwithvid failed\n");
+                  dprintf("zfs: woah vnode_getwithvid failed\n");
                   goto again;
                 }
 
@@ -1330,7 +1330,7 @@ again:
         ZFS_OBJ_HOLD_EXIT(zfsvfs, obj_num);
         getnewvnode_drop_reserve();
 
-        printf("Waiting on zp %p to die!\n", zp);
+        dprintf("Waiting on zp %p to die!\n", zp);
         //delay(hz>>1);
         cv_signal(&zfsvfs->z_reclaim_thr_cv);
         while(!list_is_empty(&zfsvfs->z_reclaim_znodes)) delay(hz >> 2);
@@ -1571,6 +1571,7 @@ zfs_znode_free(znode_t *zp)
 	VFS_RELE(zfsvfs->z_vfs);
 }
 
+#ifdef LINUX
 static inline int
 zfs_compare_timespec(struct timespec *t1, struct timespec *t2)
 {
@@ -1582,6 +1583,7 @@ zfs_compare_timespec(struct timespec *t1, struct timespec *t2)
 
 	return (t1->tv_nsec - t2->tv_nsec);
 }
+#endif
 
 /*
  *  Determine whether the znode's atime must be updated.  The logic mostly
@@ -1589,10 +1591,10 @@ zfs_compare_timespec(struct timespec *t1, struct timespec *t2)
  *  This function is only called if the underlying filesystem actually has
  *  atime updates enabled.
  */
+#ifdef LINUX
 static inline boolean_t
 zfs_atime_need_update(znode_t *zp, timestruc_t *now)
 {
-#ifdef LINUX
 	if (!ZTOZSB(zp)->z_relatime)
 		return (B_TRUE);
 
@@ -1609,9 +1611,9 @@ zfs_atime_need_update(znode_t *zp, timestruc_t *now)
 
 	if ((long)now->tv_sec - ZTOI(zp)->i_atime.tv_sec >= 24*60*60)
 		return (B_TRUE);
-#endif
 	return (B_FALSE);
 }
+#endif
 
 /*
  * Prepare to update znode time stamps.
