@@ -54,7 +54,9 @@
 
 #ifdef __APPLE__
 #include <sys/zfs_mount.h>
+void libshare_init(void);
 #endif /* __APPLE__ */
+
 
 int
 libzfs_errno(libzfs_handle_t *hdl)
@@ -661,7 +663,6 @@ libzfs_run_process(const char *path, char *argv[], int flags)
 {
 	pid_t pid;
 	int rc, devnull_fd;
-	char **argp;
 
 	pid = vfork();
 	if (pid == 0) {
@@ -738,6 +739,9 @@ libzfs_load_module(const char *module)
 				(void) fprintf( stderr, gettext( "Error: %s.kext exists in both /Library/Extensions and in /System/Library/Extensions!\n"),
 										  module );
 				return EPERM;
+			}
+			else{
+				ret = 0;
 			}
 		}
 	}
@@ -1666,7 +1670,7 @@ addlist(libzfs_handle_t *hdl, char *propname, zprop_list_t **listp,
 
 	prop = zprop_name_to_prop(propname, type);
 
-	if (prop != ZPROP_INVAL && !zprop_valid_for_type(prop, type))
+	if (prop != ZPROP_INVAL && !zprop_valid_for_type(prop, type, B_FALSE))
 		prop = ZPROP_INVAL;
 
 	/*

@@ -73,6 +73,8 @@ unsigned int zfs_vnop_create_negatives = 1;
 unsigned int zfs_vnop_reclaim_throttle = 33280;
 #endif
 
+extern int zfs_vnop_force_formd_normalized_output; /* disabled by default */
+
 #define	DECLARE_CRED(ap) \
 	cred_t *cr = (cred_t *)vfs_context_ucred((ap)->a_context)
 #define	DECLARE_CONTEXT(ap) \
@@ -373,6 +375,7 @@ zfs_vnop_lookup(struct vnop_lookup_args *ap)
 	int error;
 	char *filename = NULL;
 	int negative_cache = 0;
+	int filename_num_bytes = 0;
 
 	*ap->a_vpp = NULL;	/* In case we return an error */
 
@@ -382,7 +385,8 @@ zfs_vnop_lookup(struct vnop_lookup_args *ap)
 	 * case we need to copy it out to null-terminate.
 	 */
 	if (cnp->cn_nameptr[cnp->cn_namelen] != 0) {
-		MALLOC(filename, char *, cnp->cn_namelen+1, M_TEMP, M_WAITOK);
+		filename_num_bytes = cnp->cn_namelen + 1;
+		filename = (char*)kmem_alloc(filename_num_bytes, KM_SLEEP);
 		if (filename == NULL)
 			return (ENOMEM);
 		bcopy(cnp->cn_nameptr, filename, cnp->cn_namelen);
@@ -460,7 +464,7 @@ exit:
 		zfs_finder_keep_hardlink(*ap->a_vpp,
 		    filename ? filename : cnp->cn_nameptr);
 	if (filename)
-		FREE(filename, M_TEMP);
+		kmem_free(filename, filename_num_bytes);
 
 	if (!error && ap->a_vpp && *ap->a_vpp && VTOZ(*ap->a_vpp))
 		zfs_vnop_throttle_reclaim(VTOZ(*ap->a_vpp)->z_zfsvfs);
@@ -1564,6 +1568,17 @@ zfs_vnop_reclaim(struct vnop_reclaim_args *ap)
 	vnode_clearfsnode(vp); /* vp->v_data = NULL */
 	vnode_removefsref(vp); /* ADDREF from vnode_create */
 
+	if (!zfsvfs) {
+		printf("ZFS: vnop_reclaim with zfsvfs == NULL - tell lundman\n");
+		return 0;
+	}
+
+	if (zfsctl_is_node(vp)) {
+		printf("ZFS: vnop_reclaim with ctldir node - tell lundman\n");
+		return 0;
+	}
+
+
 	/*
 	 * Calls into vnode_create() can trigger reclaim and since we are
 	 * likely to hold locks while inside vnode_create(), we need to defer
@@ -1803,8 +1818,8 @@ zfs_vnop_getxattr(struct vnop_getxattr_args *ap)
 		goto out;
 	}
 
-	cn.pn_buf = (char *)spa_strdup(ap->a_name);
-	cn.pn_bufsize = strlen(cn.pn_buf);
+	cn.pn_bufsize = strlen(ap->a_name) + 1;
+	cn.pn_buf = (char*)kmem_zalloc(cn.pn_bufsize, KM_SLEEP);
 
 	/* Lookup the attribute name. */
 	if ((error = zfs_dirlook(VTOZ(xdvp), (char *)ap->a_name, &xvp, 0, NULL,
@@ -1826,7 +1841,7 @@ zfs_vnop_getxattr(struct vnop_getxattr_args *ap)
 	}
 out:
 	if (cn.pn_buf)
-		spa_strfree(cn.pn_buf);
+		kmem_free(cn.pn_buf, cn.pn_bufsize);
 	if (xvp) {
 		vnode_put(xvp);
 	}
@@ -1959,8 +1974,8 @@ zfs_vnop_removexattr(struct vnop_removexattr_args *ap)
 		goto out;
 	}
 
-	cn.pn_buf = (char *)spa_strdup(ap->a_name);
-	cn.pn_bufsize = strlen(cn.pn_buf);
+	cn.pn_bufsize = strlen(ap->a_name)+1;
+	cn.pn_buf = (char *)kmem_zalloc(cn.pn_bufsize, KM_SLEEP);
 
 	/* Lookup the attribute name. */
 	if ((error = zfs_dirlook(VTOZ(xdvp), (char *)ap->a_name, &xvp, 0, NULL,
@@ -1974,7 +1989,7 @@ zfs_vnop_removexattr(struct vnop_removexattr_args *ap)
 
 out:
 	if (cn.pn_buf)
-		spa_strfree(cn.pn_buf);
+		kmem_free(cn.pn_buf, cn.pn_bufsize);
 
 	if (xvp) {
 		vnode_put(xvp);
@@ -2017,6 +2032,7 @@ zfs_vnop_listxattr(struct vnop_listxattr_args *ap)
 	size_t  namelen;
 	int  error = 0;
 	uint64_t xattr;
+	int force_formd_normalized_output;
 
 	dprintf("+listxattr vp %p\n", ap->a_vp);
 
@@ -2051,7 +2067,14 @@ zfs_vnop_listxattr(struct vnop_listxattr_args *ap)
 		 * so convert to NFD before exporting them.
 		 */
 		namelen = strlen(za.za_name);
-		if (!is_ascii_str(za.za_name) &&
+
+		if (zfs_vnop_force_formd_normalized_output &&
+		    !is_ascii_str(za.za_name))
+			force_formd_normalized_output = 1;
+		else
+			force_formd_normalized_output = 0;
+
+		if (force_formd_normalized_output &&
 		    utf8_normalizestr((const u_int8_t *)za.za_name, namelen,
 		    (u_int8_t *)nfd_name, &namelen, sizeof (nfd_name),
 		    UTF_DECOMPOSED) == 0) {
@@ -2107,7 +2130,6 @@ zfs_vnop_getnamedstream(struct vnop_getnamedstream_args *ap)
 	pathname_t cn = { 0 };
 	int  error = ENOATTR;
 	uint64_t xattr;
-
 	dprintf("+getnamedstream vp %p\n", ap->a_vp);
 
 	*svpp = NULLVP;
@@ -2126,8 +2148,8 @@ zfs_vnop_getnamedstream(struct vnop_getnamedstream_args *ap)
 	if (zfs_get_xattrdir(zp, &xdvp, cr, 0) != 0)
 		goto out;
 
-	cn.pn_buf = spa_strdup(ap->a_name);
-	cn.pn_bufsize = strlen(cn.pn_buf);
+	cn.pn_bufsize = strlen(ap->a_name) + 1;
+	cn.pn_buf = (char *)kmem_zalloc(cn.pn_bufsize, KM_SLEEP);
 
 	/* Lookup the attribute name. */
 	if ((error = zfs_dirlook(VTOZ(xdvp), (char *)ap->a_name, svpp, 0, NULL,
@@ -2135,7 +2157,8 @@ zfs_vnop_getnamedstream(struct vnop_getnamedstream_args *ap)
 		if (error == ENOENT)
 			error = ENOATTR;
 	}
-	spa_strfree(cn.pn_buf);
+
+	kmem_free(cn.pn_buf, cn.pn_bufsize);
 
 out:
 	if (xdvp)
@@ -2478,7 +2501,7 @@ zfs_vnop_readdirattr(struct vnop_readdirattr_args *ap)
 	maxsize = fixedsize;
 	if (alp->commonattr & ATTR_CMN_NAME)
 		maxsize += ZAP_MAXNAMELEN + 1;
-	MALLOC(attrbufptr, void *, maxsize, M_TEMP, M_WAITOK);
+	attrbufptr = (void*)kmem_alloc(maxsize, KM_SLEEP);
 	if (attrbufptr == NULL) {
 		return (ENOMEM);
 	}
@@ -2644,7 +2667,7 @@ update:
 	zap_cursor_fini(&zc);
 
 	if (attrbufptr) {
-		FREE(attrbufptr, M_TEMP);
+		kmem_free(attrbufptr, maxsize);
 	}
 	if (error == ENOENT) {
 		error = 0;

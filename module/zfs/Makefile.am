@@ -43,6 +43,7 @@ zfs_kext_SOURCE =
 
 zfs_SOURCES = \
 	arc.c \
+	blkptr.c \
 	bplist.c \
 	bpobj.c \
 	bptree.c \
@@ -61,6 +62,7 @@ zfs_SOURCES = \
 	dnode.c \
 	dnode_sync.c \
 	dsl_crypto.c \
+	dsl_bookmark.c \
 	dsl_dataset.c \
 	dsl_deadlist.c \
 	dsl_deleg.c \
@@ -77,6 +79,7 @@ zfs_SOURCES = \
 	lzjb.c \
 	lz4.c \
 	metaslab.c \
+	range_tree.c \
 	refcount.c \
 	rrwlock.c \
 	sa.c \
@@ -89,6 +92,7 @@ zfs_SOURCES = \
 	spa_misc.c \
 	spa_stats.c \
 	space_map.c \
+	space_reftree.c \
 	txg.c \
 	uberblock.c \
 	unique.c \
@@ -167,6 +171,7 @@ zfs.kext$(EXEEXT): zfs $(PLIST_STRING) $(INFO_PLIST)
 	mkdir -p zfs.kext/Contents/Resources/English.lproj zfs.kext/Contents/MacOS
 	cp -f $(INFO_PLIST) zfs.kext/Contents/
 	cp -f $(PLIST_STRING) zfs.kext/Contents/Resources/English.lproj/
+	plutil -convert binary1 zfs.kext/Contents/Resources/English.lproj/InfoPlist.strings
 	cp -f $(top_srcdir)/VolumeIcon.icns zfs.kext/Contents/Resources/
 	cp -f zfs zfs.kext/Contents/MacOS/
 	kextlibs -undef-symbols -e -r $(SPL_KMODDIR) -xml zfs.kext/ || echo Ignoring errors
@@ -175,7 +180,7 @@ zfs.kext$(EXEEXT): zfs $(PLIST_STRING) $(INFO_PLIST)
 debug-kext-linking:
 	kextlibs -all-symbols -e -r $(SPL_KMODDIR) -xml zfs.kext/
 
-install-exec-local: zfs.kext
+install-exec-local:: zfs.kext
 	rm -rf $(KERNEL_MODDIR)
 	mkdir -p $(KERNEL_MODDIR)
 	rsync -r zfs.kext/ $(KERNEL_MODDIR)

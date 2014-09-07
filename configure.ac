@@ -113,6 +113,7 @@ AC_CONFIG_FILES([
 	cmd/zdb/Makefile
 	cmd/zhack/Makefile
 	cmd/zfs/Makefile
+	cmd/zfs_util/Makefile
 	cmd/zinject/Makefile
 	cmd/zpool/Makefile
 	cmd/zstreamdump/Makefile
@@ -125,6 +126,8 @@ AC_CONFIG_FILES([
 	cmd/arcstat/Makefile
 	cmd/dbufstat/Makefile
 	cmd/zed/Makefile
+	contrib/Makefile
+	contrib/bash_completion.d/Makefile
 	module/Makefile
 	module/avl/Makefile
 	module/nvpair/Makefile
@@ -152,6 +155,7 @@ AC_CONFIG_FILES([
 	rpm/generic/zfs.spec
 	rpm/generic/zfs-kmod.spec
 	rpm/generic/zfs-dkms.spec
+	zfs_bundle/Makefile
 	zfs-script-config.sh
 	zfs.release
 ])
