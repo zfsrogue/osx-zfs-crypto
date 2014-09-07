@@ -19,7 +19,7 @@ kerneldir = /usr/src/zfs-$(VERSION)/$(LINUX_VERSION)
 nodist_kernel_HEADERS = zfs.release zfs_config.h
 endif
 if CONFIG_USER
-SUBDIRS += dracut udev etc man scripts lib cmd
+SUBDIRS += dracut udev etc man scripts lib cmd zfs_bundle
 endif
 
 
@@ -74,6 +74,10 @@ if CONFIG_USER
 install-data-hook::
 	@echo
 	for plistfile in $(launchddaemon_DATA); do \
+		label=`defaults read "$$PWD"/"$$plistfile" Label`; \
+		echo "Attempting to remove $$label ..."; \
+		$(DESTDIR)/bin/launchctl remove "$$label" \
+		    || echo "Ignoring errors"; \
 		bn=`basename "$$plistfile"`; \
 		echo "Attempting to load $$bn ..."; \
 		$(DESTDIR)/bin/launchctl load -w \
@@ -89,4 +93,7 @@ uninstall-hook::
 		$(DESTDIR)/bin/launchctl remove "$$label" \
 		    || echo "Ignoring errors"; \
 	done
+	$(RM) -r /System/Library/Filesystems/zfs.fs
+	$(RM) -r /System/Library/Extensions/zfs.kext
+	$(RM) -r /Library/Extensions/zfs.kext
 endif

@@ -480,7 +480,7 @@ txg_sync_thread(void *arg)
 	tx_state_t *tx = &dp->dp_tx;
 	callb_cpr_t cpr;
 	vdev_stat_t *vs1, *vs2;
-	uint64_t start, delta;
+	clock_t start, delta;
 
 #ifdef _KERNEL
 	/*
@@ -498,7 +498,7 @@ txg_sync_thread(void *arg)
 
 	start = delta = 0;
 	for (;;) {
-		uint64_t timer, timeout;
+		clock_t timer, timeout;
 		uint64_t txg;
 		uint64_t ndirty;
 
@@ -539,7 +539,9 @@ txg_sync_thread(void *arg)
 			txg_thread_exit(tx, &cpr, &tx->tx_sync_thread);
 		}
 
+		spa_config_enter(spa, SCL_ALL, FTAG, RW_READER);
 		vdev_get_stats(spa->spa_root_vdev, vs1);
+		spa_config_exit(spa, SCL_ALL, FTAG);
 
 		/*
 		 * Consume the quiesced txg which has been handed off to
@@ -575,7 +577,9 @@ txg_sync_thread(void *arg)
 		 */
 		txg_dispatch_callbacks(dp, txg);
 
+		spa_config_enter(spa, SCL_ALL, FTAG, RW_READER);
 		vdev_get_stats(spa->spa_root_vdev, vs2);
+		spa_config_exit(spa, SCL_ALL, FTAG);
 		spa_txg_history_set_io(spa, txg,
 		    vs2->vs_bytes[ZIO_TYPE_READ]-vs1->vs_bytes[ZIO_TYPE_READ],
 		    vs2->vs_bytes[ZIO_TYPE_WRITE]-vs1->vs_bytes[ZIO_TYPE_WRITE],

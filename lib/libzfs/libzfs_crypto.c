@@ -1144,7 +1144,7 @@ zfs_key_unload(zfs_handle_t *zhp, boolean_t force)
 	 */
 	if (type == ZFS_TYPE_FILESYSTEM) {
 		if (zfs_is_mounted(zhp, NULL)) {
-			ret = zfs_unmountall(zhp, force ? MS_FORCE : 0);
+			ret = zfs_unmountall(zhp, force ? MNT_FORCE : 0);
 			if (ret) {
 				zfs_error_aux(zhp->zfs_hdl,
 				    dgettext(TEXT_DOMAIN,

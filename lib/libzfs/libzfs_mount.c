@@ -84,6 +84,9 @@
 
 #ifdef __APPLE__
 #include <sys/zfs_mount.h>
+#include <CommonCrypto/CommonDigest.h>
+static off_t snowflake_icon_size = 196764; // bytes
+static unsigned char snowflake_icon_md[] = {0x77, 0x1b, 0x99, 0x36, 0x77, 0x8c, 0xc9, 0xb1, 0x19, 0x4e, 0x70, 0x9b, 0x9e, 0xc0, 0xf6, 0x5e}; // md5sum
 #endif /* __APPLE__ */
 
 //#dprintf printf
@@ -239,7 +242,8 @@ zfs_is_mountable(zfs_handle_t *zhp, char *buf, size_t buflen,
 	char sourceloc[ZFS_MAXNAMELEN];
 	zprop_source_t sourcetype;
 
-	if (!zfs_prop_valid_for_type(ZFS_PROP_MOUNTPOINT, zhp->zfs_type))
+	if (!zfs_prop_valid_for_type(ZFS_PROP_MOUNTPOINT, zhp->zfs_type,
+	    B_FALSE))
 		return (B_FALSE);
 
 	verify(zfs_prop_get(zhp, ZFS_PROP_MOUNTPOINT, buf, buflen,
@@ -430,6 +434,40 @@ zfs_add_options(zfs_handle_t *zhp, char *options, int len)
 #endif /* __LINUX */
 
 #ifdef __APPLE__
+static boolean_t
+should_update_icon(FILE *current_icon)
+{
+	struct stat sbuf;
+	off_t current_icon_size;
+	CC_MD5_CTX ctx;
+	size_t n;
+	unsigned char buf[1024];
+	unsigned char current_icon_md[CC_MD5_DIGEST_LENGTH];
+	int i;
+
+	fstat(fileno(current_icon), &sbuf);
+	current_icon_size = sbuf.st_size;
+
+	if (current_icon_size != snowflake_icon_size) {
+		return (B_FALSE);
+	}
+
+	CC_MD5_Init(&ctx);
+	while ((n = fread(buf, 1, 1024, current_icon)) > 0) {
+		CC_MD5_Update(&ctx, buf, (CC_LONG)n);
+	}
+	CC_MD5_Final(current_icon_md, &ctx);
+	rewind(current_icon);
+
+	for(i = 0; i < CC_MD5_DIGEST_LENGTH; i++) {
+		if (current_icon_md[i] != snowflake_icon_md[i]) {
+			return (B_FALSE);
+		}
+	}
+
+	return (B_TRUE);
+}
+
 /*
  * On OSX we can set the icon to an Open ZFS specific one, just to be extra
  * shiny
@@ -442,54 +480,91 @@ zfs_mount_seticon(const char *mountpoint)
 	uint16_t finderinfo[16];
 	struct stat sbuf;
 	char *path;
-    FILE *dstfp, *srcfp;
-    unsigned char buf[1024];
-    unsigned int red;
+	FILE *dstfp, *srcfp;
+	unsigned char buf[1024];
+	unsigned int red;
+	boolean_t hasicon = B_FALSE;
+	boolean_t doupdatefinder = B_FALSE;
+	char template[MAXPATHLEN];
+	int fd = -1;
 
-    /* Check if we already have a custom icon, if so, leave it alone */
 	if (asprintf(&path, "%s/%s", mountpoint, MOUNT_POINT_CUSTOM_ICON) == -1)
 		return;
-	if ((stat(path, &sbuf) == 0 && sbuf.st_size > 0)) {
-        free(path);
-        return;
-    }
 
-    /* check if we can read in the default ZFS icon */
-    srcfp = fopen(CUSTOM_ICON_PATH, "r");
+	if ((stat(path, &sbuf) == 0 && sbuf.st_size > 0))
+		hasicon = B_TRUE;
 
-    /* No icon, oh well, its cosmetics, so just give up */
-    if (!srcfp) {
-        free(path);
-        return;
-    }
+	/* check if we can read in the default ZFS icon */
+	srcfp = fopen(CUSTOM_ICON_PATH, "r");
 
-    /* Open the output icon */
-    dstfp = fopen(path, "w");
-    if (!dstfp) {
-        fclose(srcfp);
-        free(path);
-        return;
-    }
+	/* No source icon */
+	if (!srcfp) {
+		free(path);
+		if (hasicon)
+			goto setfinderinfo;
+		else
+			return;
+	}
 
+	if (hasicon) {
+		/* Open the output icon for reading */
+		dstfp = fopen(path, "r");
+		if (!dstfp) {
+			fclose(srcfp);
+			free(path);
+			goto setfinderinfo;
+		}
+		if (should_update_icon(dstfp) == B_FALSE) {
+			fclose(srcfp);
+			fclose(dstfp);
+			free(path);
+			goto setfinderinfo;
+		} else {
+			fprintf(stderr, "Updating custom icon of %s\n", mountpoint);
+			doupdatefinder = B_TRUE;
+			fclose(dstfp);
+		}
+	}
 
-    /* Copy icon */
-    while ((red = fread(buf, 1, sizeof(buf), srcfp)) > 0)
-        (void) fwrite(buf, 1, red, dstfp);
+	/* Open the output icon for writing */
+	dstfp = fopen(path, "w");
+	if (!dstfp) {
+		fclose(srcfp);
+		free(path);
+		goto setfinderinfo;
+	}
 
-    fclose(srcfp);
+	/* Copy icon */
+	while ((red = fread(buf, 1, sizeof(buf), srcfp)) > 0)
+		(void) fwrite(buf, 1, red, dstfp);
 
+	fclose(dstfp);
+	fclose(srcfp);
+	free(path);
+setfinderinfo:
 	/* Tag the root directory as having a custom icon. */
 	attrsize = getxattr(mountpoint, XATTR_FINDERINFO_NAME, &finderinfo,
 	    sizeof (finderinfo), 0, 0);
 	if (attrsize != sizeof (finderinfo))
 		(void) memset(&finderinfo, 0, sizeof(finderinfo));
-	finderinfo[4] |= BE_16(0x0400);
 
-	(void) setxattr(mountpoint, XATTR_FINDERINFO_NAME, &finderinfo,
-	    sizeof (finderinfo), 0, 0);
+	if ((finderinfo[4] & BE_16(0x0400)) == 0) {
+		finderinfo[4] |= BE_16(0x0400);
+		(void) setxattr(mountpoint, XATTR_FINDERINFO_NAME, &finderinfo,
+		    sizeof (finderinfo), 0, 0);
+		doupdatefinder = B_TRUE;
+	}
 
-    fclose(dstfp);
-	free(path);
+	/* Need to touch a visible file to get Finder to update */
+	if (doupdatefinder) {
+		strlcpy(template, mountpoint, sizeof (template));
+		strlcat(template, "/tempXXXXXX", sizeof (template));
+		if ((fd = mkstemp(template)) != -1) {
+			unlink(template); // Just delete it right away
+			close(fd);
+		} else
+			fprintf(stderr, "Failed to create temp file.\n");
+	}
 }
 #endif
 
@@ -541,6 +616,7 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
     }
 
 #ifdef __LINUX__
+
 	/*
 	 * Append default mount options which apply to the mount point.
 	 * This is done because under Linux (unlike Solaris) multiple mount
@@ -645,8 +721,20 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 	if (zhp->zfs_type == ZFS_TYPE_SNAPSHOT)
 		fprintf(stderr, "ZFS: snapshot mountpoint '%s'\n", mountpoint);
 
-	if (!(flags & MS_RDONLY))
+	if (!(flags & MS_RDONLY)) {
+		char *path;
+
+		/* We need to fully disable Spotlight, or it can hang at export */
+		if (asprintf(&path, "%s/.metadata_never_index", mountpoint) > 0) {
+			int fd;
+			fd = open(path, O_RDONLY|O_TRUNC|O_CREAT, 0644);
+			if (fd > 0) close(fd);
+			free(path);
+		}
+
 		zfs_mount_seticon(mountpoint);
+
+	}
 #endif
 
 	/* remove the mounted entry before re-adding on remount */
@@ -1394,6 +1482,9 @@ zpool_disable_volumes(zfs_handle_t *nzhp, void *data)
 					    "'%s'\n", zfs_get_name(nzhp));
 					dstlnk[ret] = '\0';
 					do_unmount_volume(dstlnk, 0);
+				} else {
+					printf("Unable to automatically unmount ZVOL, is 'zed' running?\n");
+					printf("Use 'diskutil unmountdisk /dev/diskX' to complete export.\n");
 				}
 				free(volume);
 			}

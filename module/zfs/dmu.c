@@ -20,7 +20,7 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2013 by Delphix. All rights reserved.
+ * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
  */
 
@@ -143,17 +143,13 @@ const dmu_object_byteswap_info_t dmu_ot_byteswap[DMU_BSWAP_NUMFUNCS] = {
 };
 
 int
-dmu_buf_hold(objset_t *os, uint64_t object, uint64_t offset,
-    void *tag, dmu_buf_t **dbp, int flags)
+dmu_buf_hold_noread(objset_t *os, uint64_t object, uint64_t offset,
+    void *tag, dmu_buf_t **dbp)
 {
 	dnode_t *dn;
 	uint64_t blkid;
 	dmu_buf_impl_t *db;
 	int err;
-	int db_flags = DB_RF_CANFAIL;
-
-	if (flags & DMU_READ_NO_PREFETCH)
-		db_flags |= DB_RF_NOPREFETCH;
 
 	err = dnode_hold(os, object, FTAG, &dn);
 	if (err)
@@ -162,18 +158,37 @@ dmu_buf_hold(objset_t *os, uint64_t object, uint64_t offset,
 	rw_enter(&dn->dn_struct_rwlock, RW_READER);
 	db = dbuf_hold(dn, blkid, tag);
 	rw_exit(&dn->dn_struct_rwlock);
+	dnode_rele(dn, FTAG);
+
 	if (db == NULL) {
-		err = SET_ERROR(EIO);
-	} else {
+		*dbp = NULL;
+		return (SET_ERROR(EIO));
+	}
+
+	*dbp = &db->db;
+	return (err);
+}
+
+int
+dmu_buf_hold(objset_t *os, uint64_t object, uint64_t offset,
+    void *tag, dmu_buf_t **dbp, int flags)
+{
+	int err;
+	int db_flags = DB_RF_CANFAIL;
+
+	if (flags & DMU_READ_NO_PREFETCH)
+		db_flags |= DB_RF_NOPREFETCH;
+
+	err = dmu_buf_hold_noread(os, object, offset, tag, dbp);
+	if (err == 0) {
+		dmu_buf_impl_t *db = (dmu_buf_impl_t *)(*dbp);
 		err = dbuf_read(db, NULL, db_flags);
-		if (err) {
+		if (err != 0) {
 			dbuf_rele(db, tag);
-			db = NULL;
+			*dbp = NULL;
 		}
 	}
 
-	dnode_rele(dn, FTAG);
-	*dbp = &db->db; /* NULL db plus first field offset is NULL */
 	return (err);
 }
 
@@ -703,7 +718,7 @@ dmu_free_long_range(objset_t *os, uint64_t object,
 	 * will take the fast path, and (b) dnode_reallocate() can verify
 	 * that the entire file has been freed.
 	 */
-	if (offset == 0 && length == DMU_OBJECT_END)
+	if (err == 0 && offset == 0 && length == DMU_OBJECT_END)
 		dn->dn_maxblkid = 0;
 
 	dnode_rele(dn, FTAG);
@@ -869,6 +884,25 @@ dmu_prealloc(objset_t *os, uint64_t object, uint64_t offset, uint64_t size,
 		dmu_buf_will_not_fill(db, tx);
 	}
 	dmu_buf_rele_array(dbp, numbufs, FTAG);
+}
+
+void
+dmu_write_embedded(objset_t *os, uint64_t object, uint64_t offset,
+    void *data, uint8_t etype, uint8_t comp, int uncompressed_size,
+    int compressed_size, int byteorder, dmu_tx_t *tx)
+{
+	dmu_buf_t *db;
+
+	ASSERT3U(etype, <, NUM_BP_EMBEDDED_TYPES);
+	ASSERT3U(comp, <, ZIO_COMPRESS_FUNCTIONS);
+	VERIFY0(dmu_buf_hold_noread(os, object, offset,
+	    FTAG, &db));
+
+	dmu_buf_write_embedded(db,
+	    data, (bp_embedded_type_t)etype, (enum zio_compress)comp,
+	    uncompressed_size, compressed_size, byteorder, tx);
+
+	dmu_buf_rele(db, FTAG);
 }
 
 /*
@@ -1041,93 +1075,53 @@ xuio_stat_wbuf_nocopy()
 
 /*
  * Copy up to size bytes between arg_buf and req based on the data direction
- * described by the req.  If an entire req's data cannot be transfered the
- * req's is updated such that it's current index and bv offsets correctly
- * reference any residual data which could not be copied.  The return value
- * is the number of bytes successfully copied to arg_buf.
+ * described by the req.  If an entire req's data cannot be transfered in one
+ * pass, you should pass in @req_offset to indicate where to continue. The
+ * return value is the number of bytes successfully copied to arg_buf.
  */
 static int
-dmu_req_copy(void *arg_buf, int size, int *offset, struct request *req)
+dmu_req_copy(void *arg_buf, int size, struct request *req, size_t req_offset)
 {
-	struct bio_vec *bv;
+	struct bio_vec bv, *bvp;
 	struct req_iterator iter;
 	char *bv_buf;
-	int tocpy;
+	int tocpy, bv_len, bv_offset;
+	int offset = 0;
 
-	*offset = 0;
-	rq_for_each_segment(bv, req, iter) {
+	rq_for_each_segment4(bv, bvp, req, iter) {
+		/*
+		 * Fully consumed the passed arg_buf. We use goto here because
+		 * rq_for_each_segment is a double loop
+		 */
+		ASSERT3S(offset, <=, size);
+		if (size == offset)
+			goto out;
 
-		/* Fully consumed the passed arg_buf */
-		ASSERT3S(*offset, <=, size);
-		if (size == *offset)
-			break;
-
-		/* Skip fully consumed bv's */
-		if (bv->bv_len == 0)
+		/* Skip already copied bv */
+		if (req_offset >=  bv.bv_len) {
+			req_offset -= bv.bv_len;
 			continue;
+		}
 
-		tocpy = MIN(bv->bv_len, size - *offset);
+		bv_len = bv.bv_len - req_offset;
+		bv_offset = bv.bv_offset + req_offset;
+		req_offset = 0;
+
+		tocpy = MIN(bv_len, size - offset);
 		ASSERT3S(tocpy, >=, 0);
 
-		bv_buf = page_address(bv->bv_page) + bv->bv_offset;
+		bv_buf = page_address(bv.bv_page) + bv_offset;
 		ASSERT3P(bv_buf, !=, NULL);
 
 		if (rq_data_dir(req) == WRITE)
-			memcpy(arg_buf + *offset, bv_buf, tocpy);
+			memcpy(arg_buf + offset, bv_buf, tocpy);
 		else
-			memcpy(bv_buf, arg_buf + *offset, tocpy);
+			memcpy(bv_buf, arg_buf + offset, tocpy);
 
-		*offset += tocpy;
-		bv->bv_offset += tocpy;
-		bv->bv_len -= tocpy;
+		offset += tocpy;
 	}
-
-	return (0);
-}
-
-static void
-dmu_bio_put(struct bio *bio)
-{
-	struct bio *bio_next;
-
-	while (bio) {
-		bio_next = bio->bi_next;
-		bio_put(bio);
-		bio = bio_next;
-	}
-}
-
-static int
-dmu_bio_clone(struct bio *bio, struct bio **bio_copy)
-{
-	struct bio *bio_root = NULL;
-	struct bio *bio_last = NULL;
-	struct bio *bio_new;
-
-	if (bio == NULL)
-		return (EINVAL);
-
-	while (bio) {
-		bio_new = bio_clone(bio, GFP_NOIO);
-		if (bio_new == NULL) {
-			dmu_bio_put(bio_root);
-			return (ENOMEM);
-		}
-
-		if (bio_last) {
-			bio_last->bi_next = bio_new;
-			bio_last = bio_new;
-		} else {
-			bio_root = bio_new;
-			bio_last = bio_new;
-		}
-
-		bio = bio->bi_next;
-	}
-
-	*bio_copy = bio_root;
-
-	return (0);
+out:
+	return (offset);
 }
 
 int
@@ -1135,9 +1129,9 @@ dmu_read_req(objset_t *os, uint64_t object, struct request *req)
 {
 	uint64_t size = blk_rq_bytes(req);
 	uint64_t offset = blk_rq_pos(req) << 9;
-	struct bio *bio_saved = req->bio;
 	dmu_buf_t **dbp;
 	int numbufs, i, err;
+	size_t req_offset;
 
 	/*
 	 * NB: we could do this block-at-a-time, but it's nice
@@ -1148,17 +1142,7 @@ dmu_read_req(objset_t *os, uint64_t object, struct request *req)
 	if (err)
 		return (err);
 
-	/*
-	 * Clone the bio list so the bv->bv_offset and bv->bv_len members
-	 * can be safely modified.  The original bio list is relinked in to
-	 * the request when the function exits.  This is required because
-	 * some file systems blindly assume that these values will remain
-	 * constant between bio_submit() and the IO completion callback.
-	 */
-	err = dmu_bio_clone(bio_saved, &req->bio);
-	if (err)
-		goto error;
-
+	req_offset = 0;
 	for (i = 0; i < numbufs; i++) {
 		int tocpy, didcpy, bufoff;
 		dmu_buf_t *db = dbp[i];
@@ -1170,7 +1154,8 @@ dmu_read_req(objset_t *os, uint64_t object, struct request *req)
 		if (tocpy == 0)
 			break;
 
-		err = dmu_req_copy(db->db_data + bufoff, tocpy, &didcpy, req);
+		didcpy = dmu_req_copy(db->db_data + bufoff, tocpy, req,
+		    req_offset);
 
 		if (didcpy < tocpy)
 			err = EIO;
@@ -1180,12 +1165,9 @@ dmu_read_req(objset_t *os, uint64_t object, struct request *req)
 
 		size -= tocpy;
 		offset += didcpy;
+		req_offset += didcpy;
 		err = 0;
 	}
-
-	dmu_bio_put(req->bio);
-	req->bio = bio_saved;
-error:
 	dmu_buf_rele_array(dbp, numbufs, FTAG);
 
 	return (err);
@@ -1196,11 +1178,9 @@ dmu_write_req(objset_t *os, uint64_t object, struct request *req, dmu_tx_t *tx)
 {
 	uint64_t size = blk_rq_bytes(req);
 	uint64_t offset = blk_rq_pos(req) << 9;
-	struct bio *bio_saved = req->bio;
 	dmu_buf_t **dbp;
-	int numbufs;
-	int err = 0;
-	int i;
+	int numbufs, i, err;
+	size_t req_offset;
 
 	if (size == 0)
 		return (0);
@@ -1210,17 +1190,7 @@ dmu_write_req(objset_t *os, uint64_t object, struct request *req, dmu_tx_t *tx)
 	if (err)
 		return (err);
 
-	/*
-	 * Clone the bio list so the bv->bv_offset and bv->bv_len members
-	 * can be safely modified.  The original bio list is relinked in to
-	 * the request when the function exits.  This is required because
-	 * some file systems blindly assume that these values will remain
-	 * constant between bio_submit() and the IO completion callback.
-	 */
-	err = dmu_bio_clone(bio_saved, &req->bio);
-	if (err)
-		goto error;
-
+	req_offset = 0;
 	for (i = 0; i < numbufs; i++) {
 		int tocpy, didcpy, bufoff;
 		dmu_buf_t *db = dbp[i];
@@ -1239,7 +1209,8 @@ dmu_write_req(objset_t *os, uint64_t object, struct request *req, dmu_tx_t *tx)
 		else
 			dmu_buf_will_dirty(db, tx);
 
-		err = dmu_req_copy(db->db_data + bufoff, tocpy, &didcpy, req);
+		didcpy = dmu_req_copy(db->db_data + bufoff, tocpy, req,
+		    req_offset);
 
 		if (tocpy == db->db_size)
 			dmu_buf_fill_done(db, tx);
@@ -1252,20 +1223,15 @@ dmu_write_req(objset_t *os, uint64_t object, struct request *req, dmu_tx_t *tx)
 
 		size -= tocpy;
 		offset += didcpy;
+		req_offset += didcpy;
 		err = 0;
 	}
 
-	dmu_bio_put(req->bio);
-	req->bio = bio_saved;
-error:
 	dmu_buf_rele_array(dbp, numbufs, FTAG);
-
 	return (err);
 }
 
 #endif
-
-
 
 int
 dmu_read_uio(objset_t *os, uint64_t object, uio_t *uio, uint64_t size)
@@ -1278,12 +1244,20 @@ dmu_read_uio(objset_t *os, uint64_t object, uio_t *uio, uint64_t size)
 	 * NB: we could do this block-at-a-time, but it's nice
 	 * to be reading in parallel.
 	 */
-	//err = dmu_buf_hold_array(os, object, uio->uio_loffset, size, TRUE, FTAG,
-    //   &numbufs, &dbp);
+#ifndef __APPLE__
+	err = dmu_buf_hold_array(os, object, uio->uio_loffset, size, TRUE, FTAG,
+	    &numbufs, &dbp);
+#else
 	err = dmu_buf_hold_array(os, object, uio_offset(uio), size, TRUE, FTAG,
 	    &numbufs, &dbp);
+#endif
 	if (err)
 		return (err);
+
+#ifdef UIO_XUIO
+	if (uio->uio_extflg == UIO_XUIO)
+		xuio = (xuio_t *)uio;
+#endif
 
 	for (i = 0; i < numbufs; i++) {
 		int tocpy;
@@ -1292,8 +1266,11 @@ dmu_read_uio(objset_t *os, uint64_t object, uio_t *uio, uint64_t size)
 
 		ASSERT(size > 0);
 
-		//bufoff = uio->uio_loffset - db->db_offset;
+#ifndef __APPLE__
+		bufoff = uio->uio_loffset - db->db_offset;
+#else
 		bufoff = uio_offset(uio) - db->db_offset;
+#endif
 		tocpy = (int)MIN(db->db_size - bufoff, size);
 
 		if (xuio) {
@@ -1302,9 +1279,12 @@ dmu_read_uio(objset_t *os, uint64_t object, uio_t *uio, uint64_t size)
 			arc_buf_t *abuf = dbuf_loan_arcbuf(dbi);
 			err = dmu_xuio_add(xuio, abuf, bufoff, tocpy);
 			if (!err) {
-				//uio->uio_resid -= tocpy;
-				//uio->uio_loffset += tocpy;
-                uio_update(uio, tocpy);
+#ifndef __APPLE__
+				uio->uio_resid -= tocpy;
+				uio->uio_loffset += tocpy;
+#else
+				uio_update(uio, tocpy);
+#endif
 			}
 
 			if (abuf == dbuf_abuf)
@@ -1585,10 +1565,8 @@ arc_buf_t *
 dmu_request_arcbuf(dmu_buf_t *handle, int size)
 {
 	dmu_buf_impl_t *db = (dmu_buf_impl_t *)handle;
-	spa_t *spa;
 
-	DB_GET_SPA(&spa, db);
-	return (arc_loan_buf(spa, size));
+	return (arc_loan_buf(db->db_objset->os_spa, size));
 }
 
 /*
@@ -1666,7 +1644,7 @@ dmu_sync_ready(zio_t *zio, arc_buf_t *buf, void *varg)
 			 * block size still needs to be known for replay.
 			 */
 			BP_SET_LSIZE(bp, db->db_size);
-		} else {
+		} else if (!BP_IS_EMBEDDED(bp)) {
 			ASSERT(BP_GET_LEVEL(bp) == 0);
 			bp->blk_fill = 1;
 		}
@@ -1748,7 +1726,7 @@ dmu_sync_late_arrival_done(zio_t *zio)
 
 static int
 dmu_sync_late_arrival(zio_t *pio, objset_t *os, dmu_sync_cb_t *done, zgd_t *zgd,
-    zio_prop_t *zp, zbookmark_t *zb)
+    zio_prop_t *zp, zbookmark_phys_t *zb)
 {
 	dmu_sync_arg_t *dsa;
 	dmu_tx_t *tx;
@@ -1809,7 +1787,7 @@ dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
 	dsl_dataset_t *ds = os->os_dsl_dataset;
 	dbuf_dirty_record_t *dr;
 	dmu_sync_arg_t *dsa;
-	zbookmark_t zb;
+	zbookmark_phys_t zb;
 	zio_prop_t zp;
 	dnode_t *dn;
 
@@ -1937,9 +1915,15 @@ dmu_object_set_checksum(objset_t *os, uint64_t object, uint8_t checksum,
 {
 	dnode_t *dn;
 
-	/* XXX assumes dnode_hold will not get an i/o error */
-	(void) dnode_hold(os, object, FTAG, &dn);
-	ASSERT(checksum < ZIO_CHECKSUM_FUNCTIONS);
+	/*
+	 * Send streams include each object's checksum function.  This
+	 * check ensures that the receiving system can understand the
+	 * checksum function transmitted.
+	 */
+	ASSERT3U(checksum, <, ZIO_CHECKSUM_LEGACY_FUNCTIONS);
+
+	VERIFY0(dnode_hold(os, object, FTAG, &dn));
+	ASSERT3U(checksum, <, ZIO_CHECKSUM_FUNCTIONS);
 	dn->dn_checksum = checksum;
 	dnode_setdirty(dn, tx);
 	dnode_rele(dn, FTAG);
@@ -1951,15 +1935,26 @@ dmu_object_set_compress(objset_t *os, uint64_t object, uint8_t compress,
 {
 	dnode_t *dn;
 
-	/* XXX assumes dnode_hold will not get an i/o error */
-	(void) dnode_hold(os, object, FTAG, &dn);
-	ASSERT(compress < ZIO_COMPRESS_FUNCTIONS);
+	/*
+	 * Send streams include each object's compression function.  This
+	 * check ensures that the receiving system can understand the
+	 * compression function transmitted.
+	 */
+	ASSERT3U(compress, <, ZIO_COMPRESS_LEGACY_FUNCTIONS);
+
+	VERIFY0(dnode_hold(os, object, FTAG, &dn));
 	dn->dn_compress = compress;
 	dnode_setdirty(dn, tx);
 	dnode_rele(dn, FTAG);
 }
 
 int zfs_mdcomp_disable = 0;
+
+/*
+ * When the "redundant_metadata" property is set to "most", only indirect
+ * blocks of this level and higher will have an additional ditto block.
+ */
+int zfs_redundant_metadata_most_ditto_level = 2;
 
 void
 dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
@@ -2001,6 +1996,13 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 		if (zio_checksum_table[checksum].ci_correctable < 1 ||
 		    zio_checksum_table[checksum].ci_eck)
 			checksum = ZIO_CHECKSUM_FLETCHER_4;
+
+		if (os->os_redundant_metadata == ZFS_REDUNDANT_METADATA_ALL ||
+		    (os->os_redundant_metadata ==
+		    ZFS_REDUNDANT_METADATA_MOST &&
+		    (level >= zfs_redundant_metadata_most_ditto_level ||
+		    DMU_OT_IS_METADATA(type) || (wp & WP_SPILL))))
+			copies++;
 	} else if (wp & WP_NOFILL) {
 		ASSERT(level == 0);
 
@@ -2135,7 +2137,7 @@ __dmu_object_info_from_dnode(dnode_t *dn, dmu_object_info_t *doi)
 	doi->doi_max_offset = (dn->dn_maxblkid + 1) * dn->dn_datablksz;
 	doi->doi_fill_count = 0;
 	for (i = 0; i < dnp->dn_nblkptr; i++)
-		doi->doi_fill_count += dnp->dn_blkptr[i].blk_fill;
+		doi->doi_fill_count += BP_GET_FILL(&dnp->dn_blkptr[i]);
 }
 
 void
@@ -2294,12 +2296,6 @@ dmu_allocate_check(objset_t *z_os, off_t length)
 }
 
 void
-dmu_buf_will_dirty(dmu_buf_t *db, dmu_tx_t *tx)
-{
-    dbuf_will_dirty((dmu_buf_impl_t *)db, tx);
-}
-
-void
 dmu_buf_fill_done(dmu_buf_t *db, dmu_tx_t *tx)
 {
     dbuf_fill_done((dmu_buf_impl_t *)db, tx);
@@ -2311,17 +2307,6 @@ dmu_buf_add_ref(dmu_buf_t *db, void* tag)
     dbuf_add_ref((dmu_buf_impl_t *)db, tag);
 }
 
-void
-dmu_buf_rele(dmu_buf_t *db, void *tag)
-{
-    dbuf_rele((dmu_buf_impl_t *)db, tag);
-}
-
-uint64_t
-dmu_buf_refcount(dmu_buf_t *db)
-{
-    return dbuf_refcount((dmu_buf_impl_t *)db);
-}
 
 
 
