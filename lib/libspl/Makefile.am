@@ -8,7 +8,8 @@ SUBDIRS = include $(TARGET_ASM_DIR)
 DIST_SUBDIRS = include asm-generic #asm-i386 asm-x86_64
 
 DEFAULT_INCLUDES += \
-	-I$(top_srcdir)/lib/libspl/include
+	-I$(top_srcdir)/lib/libspl/include \
+	-I$(top_srcdir)/include
 
 AM_CCASFLAGS = \
 	-I$(top_srcdir)/lib/libspl/include
@@ -16,6 +17,7 @@ AM_CCASFLAGS = \
 noinst_LTLIBRARIES = libspl.la
 
 libspl_la_SOURCES = \
+	fdatasync.c \
 	gethrtime.c \
 	gethrestime.c \
 	getmntany.c \
@@ -26,6 +28,7 @@ libspl_la_SOURCES = \
 	crypto.c \
 	strnlen.c \
 	timestamp.c \
+	zmount.c \
 	zone.c \
 	xdr.c \
 	asm-generic/atomic.S \

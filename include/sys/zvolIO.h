@@ -8,7 +8,6 @@ class net_lundman_zfs_zvol : public IOService
   OSDeclareDefaultStructors(net_lundman_zfs_zvol)
 
   private:
-    void *m_memoryDesc;
     void *m_buffer;
 
   public:
@@ -72,7 +71,7 @@ public:
                                        IOStorageCompletion *completion);
     virtual bool handleOpen( IOService *client, IOOptionBits options, void *access);
     virtual void handleClose( IOService *client, IOOptionBits options);
-    virtual void getBSDName();
+    virtual int getBSDName();
 };
 
 #endif

@@ -1015,9 +1015,7 @@ dmu_objset_clone(const char *clone, const char *origin,
         doca.doca_clone = clone;
         doca.doca_origin = origin;
         doca.doca_crypto_ctx = crypto_ctx;
-#ifdef _KERNEL
-        doca.doca_cred = vfs_context_current();
-#endif
+	doca.doca_cred = CRED();
 
         return (dsl_sync_task(clone,
             dmu_objset_clone_check, dmu_objset_clone_sync, &doca, 5));

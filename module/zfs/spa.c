@@ -79,6 +79,7 @@
 #include <sys/sysdc.h>
 #include <sys/zone.h>
 #include <sys/vnode.h>
+#include <libkern/OSKextLib.h>
 #endif	/* _KERNEL */
 
 #include "zfs_prop.h"
@@ -317,7 +318,7 @@ spa_prop_get(spa_t *spa, nvlist_t **nvp)
 		zprop_source_t src = ZPROP_SRC_DEFAULT;
 		zpool_prop_t prop;
 
-		if ((prop = zpool_name_to_prop(za.za_name)) == ZPROP_INVAL)
+		if ((int)(prop = zpool_name_to_prop(za.za_name)) == ZPROP_INVAL)
 			continue;
 
 		switch (za.za_integer_length) {
@@ -647,7 +648,7 @@ spa_prop_set(spa_t *spa, nvlist_t *nvp)
 		    prop == ZPOOL_PROP_READONLY)
 			continue;
 
-		if (prop == ZPOOL_PROP_VERSION || prop == ZPROP_INVAL) {
+		if (prop == ZPOOL_PROP_VERSION || (int)prop == ZPROP_INVAL) {
 			uint64_t ver;
 
 			if (prop == ZPOOL_PROP_VERSION) {
@@ -3027,7 +3028,7 @@ spa_open_common(const char *pool, spa_t **spapp, void *tag, nvlist_t *nvpolicy,
 #ifdef _KERNEL
 	if (firstopen) {
 		zvol_create_minors(spa->spa_name);
-    }
+	}
 #endif
 
 	*spapp = spa;
@@ -4286,6 +4287,9 @@ spa_export_common(char *pool, int new_state, nvlist_t **oldconfig,
 		}
 	}
 
+#ifdef _KERNEL
+	zvol_remove_minors_symlink(pool);
+#endif
 	spa_event_notify(spa, NULL, FM_EREPORT_ZFS_POOL_DESTROY);
 
 	if (spa->spa_state != POOL_STATE_UNINITIALIZED) {
