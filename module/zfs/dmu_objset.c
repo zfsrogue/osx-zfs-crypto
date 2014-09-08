@@ -419,7 +419,6 @@ dmu_objset_open_impl(spa_t *spa, dsl_dataset_t *ds, blkptr_t *bp,
 			kmem_free(os, sizeof (objset_t));
 			return (err);
 		}
-	} else if (ds == NULL) {
         /*
          * It's the meta-objset.
          * Encryption is off for ZFS metadata but on for ZPL metadata
