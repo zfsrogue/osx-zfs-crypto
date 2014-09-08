@@ -41,6 +41,7 @@ typedef enum spa_feature {
 	SPA_FEATURE_NONE = -1,
 	SPA_FEATURE_ASYNC_DESTROY,
 	SPA_FEATURE_EMPTY_BPOBJ,
+	SPA_FEATURE_ENCRYPTION,
 	SPA_FEATURE_LZ4_COMPRESS,
 	SPA_FEATURE_SPACEMAP_HISTOGRAM,
 	SPA_FEATURE_ENABLED_TXG,
@@ -69,14 +70,6 @@ typedef struct zfeature_info {
 typedef int (zfeature_func_t)(zfeature_info_t *, void *);
 
 #define	ZFS_FEATURE_DEBUG
-
-typedef enum spa_feature {
-	SPA_FEATURE_ASYNC_DESTROY,
-	SPA_FEATURE_ENCRYPTION,
-	SPA_FEATURE_EMPTY_BPOBJ,
-	SPA_FEATURE_LZ4_COMPRESS,
-	SPA_FEATURES
-} spa_feature_t;
 
 extern zfeature_info_t spa_feature_table[SPA_FEATURES];
 

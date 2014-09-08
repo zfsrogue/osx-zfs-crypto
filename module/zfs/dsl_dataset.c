@@ -743,10 +743,10 @@ dsl_dataset_create_sync_dd(dsl_dir_t *dd, dsl_dataset_t *origin,
      * from 'enabled' to 'active'.
      */
     if (dcc && (dcc->dcc_crypt != ZIO_CRYPT_OFF) &&
-        spa_feature_is_enabled(dp->dp_spa,
-                               &spa_feature_table[SPA_FEATURE_ENCRYPTION])) {
+		spa_feature_is_enabled(dp->dp_spa,
+								SPA_FEATURE_ENCRYPTION)) {
         spa_feature_incr(dp->dp_spa,
-                         &spa_feature_table[SPA_FEATURE_ENCRYPTION],
+                         SPA_FEATURE_ENCRYPTION,
                          tx);
     }
 

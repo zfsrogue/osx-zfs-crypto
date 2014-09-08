@@ -823,6 +823,17 @@ dsl_destroy_head_sync_impl(dsl_dataset_t *ds, dmu_tx_t *tx)
 		spa_feature_decr(dp->dp_spa, SPA_FEATURE_BOOKMARKS, tx);
 	}
 
+	/* Decrease the number of encrypted filesystems, possibly bringing
+	 * feature back to enabled.
+	 */
+	if ((os->os_crypt != ZIO_CRYPT_OFF) &&
+		spa_feature_is_enabled(dp->dp_spa,
+							   SPA_FEATURE_ENCRYPTION))  {
+		spa_feature_decr(dp->dp_spa,
+						 SPA_FEATURE_ENCRYPTION,
+						 tx);
+	}
+
 	spa_prop_clear_bootfs(dp->dp_spa, ds->ds_object, tx);
 
 	ASSERT0(ds->ds_phys->ds_next_clones_obj);

@@ -571,13 +571,6 @@ dmu_send_impl(void *tag, dsl_pool_t *dp, dsl_dataset_t *ds,
 	uint64_t fromtxg = 0;
 	uint64_t featureflags = 0;
 
-	if (fromds != NULL && !dsl_dataset_is_before(ds, fromds)) {
-		dsl_dataset_rele(fromds, tag);
-		dsl_dataset_rele(ds, tag);
-		dsl_pool_rele(dp, tag);
-		return (SET_ERROR(EXDEV));
-	}
-
 	err = dmu_objset_from_ds(ds, &os);
 	if (err != 0) {
 		dsl_pool_rele(dp, tag);
@@ -1012,8 +1005,8 @@ dmu_recv_verify_features(dsl_dataset_t *ds, struct drr_begin *drrb)
                                     /*, DSL_PROP_GET_EFFECTIVE*/)); //FIXME
         rrw_exit(&ds->ds_dir->dd_pool->dp_config_rwlock, FTAG);
         if ((featureflags & DMU_BACKUP_FEATURE_ENCRYPT) &&
-            !spa_feature_is_enabled(dsl_dataset_get_spa(ds),
-                                    &spa_feature_table[SPA_FEATURE_ENCRYPTION])) {
+			!spa_feature_is_enabled(dsl_dataset_get_spa(ds),
+									SPA_FEATURE_ENCRYPTION)) {
                 return (B_FALSE);
         } else if (crypt != ZIO_CRYPT_OFF) {
                 return (featureflags & DMU_BACKUP_FEATURE_ENCRYPT);
