@@ -236,6 +236,8 @@ typedef struct znode {
     uint32_t    z_vid;  /* OSX vnode_vid */
     /* Track vnop_lookup name for Finder - not for anything else */
     char        z_finder_hardlink_name[MAXPATHLEN];
+	boolean_t   z_fastpath;
+	boolean_t   z_reclaim_reentry; /* vnode_create()->vnop_reclaim() */
 #endif
 
 #ifdef ZFS_DEBUG
@@ -415,6 +417,8 @@ extern void zfs_log_setattr(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
 extern void zfs_log_acl(zilog_t *zilog, dmu_tx_t *tx, znode_t *zp,
                         vsecattr_t *vsecp, zfs_fuid_info_t *fuidp);
 extern void vnop_reclaim_thread(void *arg);
+extern void vnop_pageout_thread(void *arg);
+extern void vnop_inactive_thread(void *arg);
 
 //extern void zfs_log_acl(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
 //         znode_t *zp, int aclcnt, ace_t *z_ace, zfs_fuid_info_t *fuidp);

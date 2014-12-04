@@ -233,6 +233,7 @@ skip_open:
 	dprintf("vdev_disk: Device %p ashift set to %d\n", devvp,
 	    dvd->vd_ashift);
 
+
 	*ashift = highbit(MAX(blksize, SPA_MINBLOCKSIZE)) - 1;
 
 	/*
@@ -278,7 +279,8 @@ out:
 	if (context)
 		(void) vfs_context_rele(context);
 
-	if (error) printf("ZFS: vdev_disk_open() failed error %d\n", error);
+	if (error) printf("ZFS: vdev_disk_open('%s') failed error %d\n",
+					  vd->vdev_path ? vd->vdev_path : "", error);
 
 	return (error);
 }

@@ -46,6 +46,12 @@
 #include <sys/zvol.h>
 
 /*
+ * When a vdev is added, it will be divided into approximately (but no
+ * more than) this number of metaslabs.
+ */
+int metaslabs_per_vdev = 200;
+
+/*
  * Virtual device management.
  */
 
@@ -869,7 +875,11 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 			if (error)
 				return (error);
 		}
-		vd->vdev_ms[m] = metaslab_init(vd->vdev_mg, m, object, txg);
+
+		error = metaslab_init(vd->vdev_mg, m, object, txg,
+		    &(vd->vdev_ms[m]));
+		if (error)
+			return (error);
 	}
 
 	if (txg == 0)
@@ -1582,9 +1592,9 @@ void
 vdev_metaslab_set_size(vdev_t *vd)
 {
 	/*
-	 * Aim for roughly 200 metaslabs per vdev.
+	 * Aim for roughly metaslabs_per_vdev (default 200) metaslabs per vdev.
 	 */
-	vd->vdev_ms_shift = highbit64(vd->vdev_asize / 200);
+	vd->vdev_ms_shift = highbit64(vd->vdev_asize / metaslabs_per_vdev);
 	vd->vdev_ms_shift = MAX(vd->vdev_ms_shift, SPA_MAXBLOCKSHIFT);
 }
 
@@ -3388,4 +3398,9 @@ EXPORT_SYMBOL(vdev_degrade);
 EXPORT_SYMBOL(vdev_online);
 EXPORT_SYMBOL(vdev_offline);
 EXPORT_SYMBOL(vdev_clear);
+
+module_param(metaslabs_per_vdev, int, 0644);
+MODULE_PARM_DESC(metaslabs_per_vdev,
+	"Divide added vdev into approximately (but no more than) this number "
+	"of metaslabs");
 #endif

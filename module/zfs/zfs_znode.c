@@ -188,6 +188,7 @@ zfs_znode_cache_constructor(void *buf, void *arg, int kmflags)
 	zp->z_dirlocks = NULL;
 	zp->z_acl_cached = NULL;
 	zp->z_moved = 0;
+	zp->z_fastpath = B_FALSE;
 	return (0);
 }
 
@@ -196,7 +197,6 @@ static void
 zfs_znode_cache_destructor(void *buf, void *arg)
 {
 	znode_t *zp = buf;
-
 	ASSERT(!POINTER_IS_VALID(zp->z_zfsvfs));
 	ASSERT(ZTOV(zp) == NULL);
 	vn_free(ZTOV(zp));
@@ -408,7 +408,7 @@ zfs_znode_init(void)
 	ASSERT(znode_cache == NULL);
 	znode_cache = kmem_cache_create("zfs_znode_cache",
 	    sizeof (znode_t), 0,
-	    /* zfs_znode_cache_constructor */ NULL,
+		zfs_znode_cache_constructor,
 	    zfs_znode_cache_destructor, NULL, NULL,
 	    NULL, 0);
 
@@ -548,7 +548,7 @@ zfs_create_share_dir(zfsvfs_t *zfsvfs, dmu_tx_t *tx)
 	vattr.va_gid = crgetgid(kcred);
 
 	sharezp = kmem_cache_alloc(znode_cache, KM_SLEEP);
-	zfs_znode_cache_constructor(sharezp, zfsvfs->z_parent->z_vfs, 0);
+	//zfs_znode_cache_constructor(sharezp, zfsvfs->z_parent->z_vfs, 0);
 	ASSERT(!POINTER_IS_VALID(sharezp->z_zfsvfs));
 	sharezp->z_moved = 0;
 	sharezp->z_unlinked = 0;
@@ -702,7 +702,7 @@ zfs_znode_alloc(zfsvfs_t *zfsvfs, dmu_buf_t *db, int blksz,
 #endif
 
 	zp = kmem_cache_alloc(znode_cache, KM_SLEEP);
-	zfs_znode_cache_constructor(zp, zfsvfs->z_parent->z_vfs, 0);
+	//zfs_znode_cache_constructor(zp, zfsvfs->z_parent->z_vfs, 0);
 
 	ASSERT(zp->z_dirlocks == NULL);
 	ASSERT(!POINTER_IS_VALID(zp->z_zfsvfs));
@@ -754,10 +754,10 @@ zfs_znode_alloc(zfsvfs_t *zfsvfs, dmu_buf_t *db, int blksz,
 	if (sa_bulk_lookup(zp->z_sa_hdl, bulk, count) != 0 || zp->z_gen == 0) {
 		if (hdl == NULL)
 			sa_handle_destroy(zp->z_sa_hdl);
+		printf("znode_alloc: sa_bulk_lookup failed - aborting\n");
 		zfs_vnode_forget(vp);
 		zp->z_vnode = NULL;
 		kmem_cache_free(znode_cache, zp);
-		dprintf("znode_alloc: sa_bulk_lookup failed - aborting\n");
 		return (NULL);
 	}
 
@@ -1568,45 +1568,36 @@ zfs_znode_delete(znode_t *zp, dmu_tx_t *tx)
 void
 zfs_zinactive(znode_t *zp)
 {
-	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
-	uint64_t z_id = zp->z_id;
-
 	ASSERT(zp->z_sa_hdl);
 
-	ZFS_OBJ_HOLD_ENTER(zfsvfs, z_id);
-
-	mutex_enter(&zp->z_lock);
+	/*
+	 * These locks may already be taken by ourselves, through vnode_create
+	 * reentry.
+	 */
 
 	/*
 	 * If this was the last reference to a file with no links,
 	 * remove the file from the file system.
 	 */
 	if (zp->z_unlinked) {
-		mutex_exit(&zp->z_lock);
-		ZFS_OBJ_HOLD_EXIT(zfsvfs, z_id);
 		zfs_rmnode(zp);
 		return;
 	}
 
-	mutex_exit(&zp->z_lock);
 	zfs_znode_dmu_fini(zp);
-	ZFS_OBJ_HOLD_EXIT(zfsvfs, z_id);
 	zfs_znode_free(zp);
 }
 
 void
 zfs_znode_free(znode_t *zp)
 {
-
-	ASSERT(zp->z_sa_hdl == NULL);
-	zp->z_vnode = NULL;
-#if 0
 	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
+
 	mutex_enter(&zfsvfs->z_znodes_lock);
+	zp->z_vnode = NULL;
 	POINTER_INVALIDATE(&zp->z_zfsvfs);
-	list_remove(&zfsvfs->z_all_znodes, zp);
+	list_remove(&zfsvfs->z_all_znodes, zp); /* XXX */
 	mutex_exit(&zfsvfs->z_znodes_lock);
-#endif
 
 	if (zp->z_acl_cached) {
 		zfs_acl_free(zp->z_acl_cached);
@@ -1952,6 +1943,13 @@ zfs_free_range(znode_t *zp, uint64_t off, uint64_t len)
 		/* offset of last_page */
 		last_page_offset = last_page << PAGE_CACHE_SHIFT;
 
+		/* truncate whole pages */
+		if (last_page_offset > first_page_offset) {
+			truncate_inode_pages_range(ZTOI(zp)->i_mapping,
+			    first_page_offset, last_page_offset - 1);
+		}
+
+		/* truncate sub-page ranges */
 		if (first_page > last_page) {
 			/* entire punched area within a single page */
 			zfs_zero_partial_page(zp, off, len);
@@ -2015,6 +2013,7 @@ zfs_trunc(znode_t *zp, uint64_t end)
 	tx = dmu_tx_create(zfsvfs->z_os);
 	dmu_tx_hold_sa(tx, zp->z_sa_hdl, B_FALSE);
 	zfs_sa_upgrade_txholds(tx, zp);
+	dmu_tx_mark_netfree(tx);
 	error = dmu_tx_assign(tx, TXG_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
@@ -2135,33 +2134,11 @@ out:
 	/*
 	 * Truncate the page cache - for file truncate operations, use
 	 * the purpose-built API for truncations.  For punching operations,
-	 * truncate only whole pages within the region; partial pages are
-	 * zeroed under a range lock in zfs_free_range().
+	 * the truncation is handled under a range lock in zfs_free_range.
 	 */
 	if (len == 0)
 		truncate_setsize(ZTOI(zp), off);
-	else if (zp->z_is_mapped) {
-		loff_t first_page, last_page;
-		loff_t first_page_offset, last_page_offset;
-
-		/* first possible full page in hole */
-		first_page = (off + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
-		/* last page of hole */
-		last_page = (off + len) >> PAGE_CACHE_SHIFT;
-
-		/* offset of first_page */
-		first_page_offset = first_page << PAGE_CACHE_SHIFT;
-		/* offset of last_page */
-		last_page_offset = last_page << PAGE_CACHE_SHIFT;
-
-		/* truncate whole pages */
-		if (last_page_offset > first_page_offset) {
-			truncate_inode_pages_range(ZTOI(zp)->i_mapping,
-			    first_page_offset, last_page_offset - 1);
-		}
-	}
 #endif
-
 	return (error);
 }
 
@@ -2257,7 +2234,7 @@ zfs_create_fs(objset_t *os, cred_t *cr, nvlist_t *zplprops, dmu_tx_t *tx)
 	bzero(&zfsvfs, sizeof (zfsvfs_t));
 
 	rootzp = kmem_cache_alloc(znode_cache, KM_SLEEP);
-	zfs_znode_cache_constructor(rootzp, NULL, 0);
+	//zfs_znode_cache_constructor(rootzp, NULL, 0);
 	ASSERT(!POINTER_IS_VALID(rootzp->z_zfsvfs));
 	rootzp->z_moved = 0;
 	rootzp->z_unlinked = 0;

@@ -184,10 +184,17 @@ zfs_getattr_znode_unlocked(struct vnode *vp, vattr_t *vap)
 	 */
 	vap->va_fileid = (zp->z_id == zfsvfs->z_root) ? 2 : zp->z_id;
 	//vap->va_fileid = (zp->z_id == zfsvfs->z_root) ? 2 : zp->z_vid;
-	vap->va_nlink = zp->z_links;
+
 	vap->va_data_size = zp->z_size;
 	vap->va_total_size = zp->z_size;
 	vap->va_gen = zp->z_gen;
+
+	if (vnode_isdir(vp)) {
+		vap->va_nlink = zp->z_size;
+	} else {
+		vap->va_nlink = zp->z_links;
+	}
+
 
 	/*
 	 * For Carbon compatibility,pretend to support this legacy/unused attribute
@@ -322,10 +329,15 @@ zfs_getattr_znode_unlocked(struct vnode *vp, vattr_t *vap)
              * be able to distringuish between mounts. For this reason
              * we simply return the fullname, from the statfs mountedfrom
              */
+			char osname[MAXNAMELEN];
+
+			dmu_objset_name(zfsvfs->z_os, osname);
+
             strlcpy(vap->va_name,
-                    vfs_statfs(vnode_mount(vp))->f_mntfromname,
+                    osname,
                     MAXPATHLEN);
             VATTR_SET_SUPPORTED(vap, va_name);
+			dprintf("getattr root returning '%s'\n", vap->va_name);
         }
 	}
 
@@ -577,10 +589,8 @@ zfs_obtain_xattr(znode_t *dzp, const char *name, mode_t mode, cred_t *cr,
 	}
 	tx = dmu_tx_create(zfsvfs->z_os);
 	dmu_tx_hold_sa(tx, dzp->z_sa_hdl, B_FALSE);
-	dmu_tx_hold_zap(tx, DMU_NEW_OBJECT, FALSE, NULL);
-	//dmu_tx_hold_bonus(tx, DMU_NEW_OBJECT);
-	//dmu_tx_hold_bonus(tx, dzp->z_id);
 	dmu_tx_hold_zap(tx, dzp->z_id, TRUE, (char *)name);
+	dmu_tx_hold_zap(tx, DMU_NEW_OBJECT, FALSE, NULL);
 
 #if 1 // FIXME
 	if (dzp->z_pflags & ZFS_INHERIT_ACE) {

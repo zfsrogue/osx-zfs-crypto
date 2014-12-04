@@ -220,7 +220,7 @@ typedef struct dmu_buf_impl {
 	 * Our link on the owner dnodes's dn_dbufs list.
 	 * Protected by its dn_dbufs_mtx.
 	 */
-	avl_node_t db_link;
+	list_node_t db_link;
 
 	/* Data which is unique to data (leaf) blocks: */
 
@@ -236,7 +236,7 @@ typedef struct dmu_buf_impl {
 } dmu_buf_impl_t;
 
 /* Note: the dbuf hash table is exposed only for the mdb module */
-#define	DBUF_MUTEXES 256
+#define	DBUF_MUTEXES 8192
 #define	DBUF_HASH_MUTEX(h, idx) (&(h)->hash_mutexes[(idx) & (DBUF_MUTEXES-1)])
 typedef struct dbuf_hash_table {
 	uint64_t hash_table_mask;
@@ -322,7 +322,7 @@ boolean_t dbuf_is_metadata(dmu_buf_impl_t *db);
 	((_db)->db_objset->os_compress != ZIO_COMPRESS_OFF ||		\
 	(dbuf_is_metadata(_db) && zfs_mdcomp_disable == B_FALSE))
 
-#ifdef ZFS_DEBUG
+#ifdef ZFS_DEBAG
 
 /*
  * There should be a ## between the string literal and fmt, to make it
