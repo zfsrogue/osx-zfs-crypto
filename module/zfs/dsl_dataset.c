@@ -748,13 +748,19 @@ dsl_dataset_create_sync_dd(dsl_dir_t *dd, dsl_dataset_t *origin,
      * Increase number of encrypted fs here, changing feature
      * from 'enabled' to 'active'.
      */
-    if (dcc && (dcc->dcc_crypt != ZIO_CRYPT_OFF) &&
-		spa_feature_is_enabled(dp->dp_spa,
-								SPA_FEATURE_ENCRYPTION)) {
-        spa_feature_incr(dp->dp_spa,
-                         SPA_FEATURE_ENCRYPTION,
-                         tx);
-    }
+    if (dcc && (dcc->dcc_crypt != ZIO_CRYPT_OFF)) {
+
+		if (spa_feature_is_enabled(dp->dp_spa,
+								   SPA_FEATURE_ENCRYPTION)) {
+			spa_feature_incr(dp->dp_spa,
+							 SPA_FEATURE_ENCRYPTION,
+							 tx);
+		} else {
+			printf("ZFS: Enabling feature encryption\n");
+			spa_feature_enable(dp->dp_spa,
+							   SPA_FEATURE_ENCRYPTION, tx);
+		}
+	}
 
 	if (spa_version(dp->dp_spa) >= SPA_VERSION_UNIQUE_ACCURATE)
 		dsphys->ds_flags |= DS_FLAG_UNIQUE_ACCURATE;
