@@ -176,6 +176,7 @@ zfs_getattr_znode_unlocked(struct vnode *vp, vattr_t *vap)
 	ZFS_ENTER(zfsvfs);
     if (!zp->z_sa_hdl) {
         ZFS_EXIT(zfsvfs);
+		printf("ZFS: getattr error\n");
         return EIO;
     }
 
@@ -317,10 +318,15 @@ zfs_getattr_znode_unlocked(struct vnode *vp, vattr_t *vap)
                         MAXPATHLEN);
                 VATTR_SET_SUPPORTED(vap, va_name);
 
-                dprintf("getattr: %p return name '%s':%04x\n", vp,
-                       vap->va_name,
-                       vap->va_linkid);
-            }
+            } else {
+            if (zap_value_search(zfsvfs->z_os, parent, zp->z_id,
+                                 ZFS_DIRENT_OBJ(-1ULL), vap->va_name) == 0)
+                VATTR_SET_SUPPORTED(vap, va_name);
+
+			}
+			dprintf("getattr: %p return name '%s':%04llx\n", vp,
+				   vap->va_name,
+				   vap->va_linkid);
 
 
         } else {
@@ -330,11 +336,11 @@ zfs_getattr_znode_unlocked(struct vnode *vp, vattr_t *vap)
              * we simply return the fullname, from the statfs mountedfrom
              */
 			char osname[MAXNAMELEN];
-
+			char *r;
 			dmu_objset_name(zfsvfs->z_os, osname);
-
+			r = strrchr(osname, '/');
             strlcpy(vap->va_name,
-                    osname,
+                    r ? &r[1] : osname,
                     MAXPATHLEN);
             VATTR_SET_SUPPORTED(vap, va_name);
 			dprintf("getattr root returning '%s'\n", vap->va_name);
@@ -357,8 +363,42 @@ zfs_getattr_znode_unlocked(struct vnode *vp, vattr_t *vap)
         VATTR_RETURN(vap, va_encoding, kTextEncodingMacUnicode);
     }
 #ifdef VNODE_ATTR_va_addedtime
+   /* ADDEDTIME should come from finderinfo according to hfs_attrlist.c
+	* in ZFS we can use crtime, and add logic to getxattr finderinfo to
+	* copy the ADDEDTIME into the structure. See vnop_getxattr
+	*/
 	if (VATTR_IS_ACTIVE(vap, va_addedtime)) {
-        VATTR_RETURN(vap, va_addedtime, vap->va_ctime);
+		uint64_t addtime[2];
+		/* Lookup the ADDTIME if it exists, if not, use CRTIME */
+		if (sa_lookup(zp->z_sa_hdl, SA_ZPL_ADDTIME(zfsvfs),
+					  &addtime, sizeof (addtime)) != 0) {
+			dprintf("ZFS: ADDEDTIME using crtime %llu (error %d)\n",
+					vap->va_crtime.tv_sec, error);
+			vap->va_addedtime.tv_sec  = vap->va_crtime.tv_sec;
+			vap->va_addedtime.tv_nsec = vap->va_crtime.tv_nsec;
+		} else {
+			dprintf("ZFS: ADDEDTIME using addtime %llu\n",
+					addtime[0]);
+			ZFS_TIME_DECODE(&vap->va_addedtime, addtime);
+		}
+        VATTR_SET_SUPPORTED(vap, va_addedtime);
+    }
+#endif
+#ifdef VNODE_ATTR_va_fsid64
+	if (VATTR_IS_ACTIVE(vap, va_fsid64)) {
+		vap->va_fsid64.val[0] = vfs_statfs(zfsvfs->z_vfs)->f_fsid.val[0];
+		vap->va_fsid64.val[1] = vfs_typenum(zfsvfs->z_vfs);
+        VATTR_SET_SUPPORTED(vap, va_fsid64);
+    }
+#endif
+#ifdef VNODE_ATTR_va_write_gencount
+	if (VATTR_IS_ACTIVE(vap, va_write_gencount)) {
+        VATTR_RETURN(vap, va_write_gencount, 0);
+    }
+#endif
+#ifdef VNODE_ATTR_va_document_id
+	if (VATTR_IS_ACTIVE(vap, va_document_id)) {
+        VATTR_RETURN(vap, va_document_id, 0);
     }
 #endif
 #if 0 // Issue #192
@@ -371,7 +411,13 @@ zfs_getattr_znode_unlocked(struct vnode *vp, vattr_t *vap)
 #endif
 
 	vap->va_supported |= ZFS_SUPPORTED_VATTRS;
-
+	uint64_t missing = 0;
+	missing = (vap->va_active ^ (vap->va_active & vap->va_supported));
+	if ( missing != 0) {
+		dprintf("vnop_getattr:: asked %08llx replied %08llx       missing %08llx\n",
+			   vap->va_active, vap->va_supported,
+			   missing);
+	}
 	ZFS_EXIT(zfsvfs);
 	return (error);
 }
@@ -626,8 +672,10 @@ zfs_obtain_xattr(znode_t *dzp, const char *name, mode_t mode, cred_t *cr,
     if (cn.pn_buf)
 		kmem_free(cn.pn_buf, cn.pn_bufsize);
 
-	if (error == EEXIST)
+	/* The REPLACE error if doesn't exist is ENOATTR */
+	if ((flag & ZEXISTS) && (error == EEXIST))
 		error = ENOATTR;
+
 	if (xzp)
 		*vpp = ZTOV(xzp);
 

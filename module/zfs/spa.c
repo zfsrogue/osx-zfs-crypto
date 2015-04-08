@@ -5918,6 +5918,7 @@ spa_async_request(spa_t *spa, int task)
 	mutex_enter(&spa->spa_async_lock);
 	spa->spa_async_tasks |= task;
 	mutex_exit(&spa->spa_async_lock);
+	spa_async_dispatch(spa);
 }
 
 /*
