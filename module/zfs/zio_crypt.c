@@ -682,6 +682,7 @@ retry:
 		goto retry;
 	case CRYPTO_INVALID_MAC:
 		err = ECKSUM;
+        printf("zio_crypt setting ECKSUM\n");
 #if _KERNEL
 #ifdef ZFS_CRYPTO_VERBOSE
         printf("zio_crypt setting ECKSUM\n");

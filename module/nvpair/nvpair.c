@@ -1239,6 +1239,7 @@ nvpair_type_is_array(nvpair_t *nvp)
 	data_type_t type = NVP_TYPE(nvp);
 
 	if ((type == DATA_TYPE_BYTE_ARRAY) ||
+	    (type == DATA_TYPE_INT8_ARRAY) ||
 	    (type == DATA_TYPE_UINT8_ARRAY) ||
 	    (type == DATA_TYPE_INT16_ARRAY) ||
 	    (type == DATA_TYPE_UINT16_ARRAY) ||
@@ -1633,6 +1634,8 @@ nvlist_lookup_nvpair_ei_sep(nvlist_t *nvl, const char *name, const char sep,
 	if ((nvl == NULL) || (name == NULL))
 		return (EINVAL);
 
+	sepp = NULL;
+	idx = 0;
 	/* step through components of name */
 	for (np = name; np && *np; np = sepp) {
 		/* ensure unique names */
@@ -3297,14 +3300,23 @@ nvs_xdr(nvstream_t *nvs, nvlist_t *nvl, char *buf, size_t *buflen)
 
 #if defined(_KERNEL) && defined(HAVE_SPL)
 
+
 #if 0
 #include <linux/module_compat.h>
 
-static int nvpair_init(void) { return 0; }
-static int nvpair_fini(void) { return 0; }
+static int __init
+nvpair_init(void)
+{
+	return (0);
+}
 
-spl_module_init(nvpair_init);
-spl_module_exit(nvpair_fini);
+static void __exit
+nvpair_fini(void)
+{
+}
+
+module_init(nvpair_init);
+module_exit(nvpair_fini);
 
 MODULE_DESCRIPTION("Generic name/value pair implementation");
 MODULE_AUTHOR(ZFS_META_AUTHOR);

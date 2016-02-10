@@ -21,7 +21,8 @@
 
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2012 by Delphix. All rights reserved.
+ * Copyright (c) 2013, Joyent, Inc. All rights reserved.
+ * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
  */
 
 /*
@@ -62,6 +63,31 @@ int
 libzfs_errno(libzfs_handle_t *hdl)
 {
 	return (hdl->libzfs_error);
+}
+
+const char *
+libzfs_error_init(int error)
+{
+	switch (error) {
+	case ENXIO:
+		return (dgettext(TEXT_DOMAIN, "The ZFS modules are not "
+		    "loaded.\nTry running '/sbin/modprobe zfs' as root "
+		    "to load them.\n"));
+	case ENOENT:
+		return (dgettext(TEXT_DOMAIN, "The /dev/zfs device is "
+		    "missing and must be created.\nTry running 'udevadm "
+		    "trigger' as root to create it.\n"));
+	case ENOEXEC:
+		return (dgettext(TEXT_DOMAIN, "The ZFS modules cannot be "
+		    "auto-loaded.\nTry running '/sbin/modprobe zfs' as "
+		    "root to manually load them.\n"));
+	case EACCES:
+		return (dgettext(TEXT_DOMAIN, "Permission denied the "
+		    "ZFS utilities must be run as root.\n"));
+	default:
+		return (dgettext(TEXT_DOMAIN, "Failed to initialize the "
+		    "libzfs library.\n"));
+	}
 }
 
 const char *
@@ -580,7 +606,7 @@ zfs_nicenum(uint64_t num, char *buf, size_t buflen)
 	int index = 0;
 	char u;
 
-	while (n >= 1024) {
+	while (n >= 1024 && index < 6) {
 		n /= 1024;
 		index++;
 	}
@@ -662,7 +688,7 @@ int
 libzfs_run_process(const char *path, char *argv[], int flags)
 {
 	pid_t pid;
-	int rc, devnull_fd;
+	int error, devnull_fd;
 
 	pid = vfork();
 	if (pid == 0) {
@@ -690,9 +716,9 @@ libzfs_run_process(const char *path, char *argv[], int flags)
 	} else if (pid > 0) {
 		int status;
 
-		while ((rc = waitpid(pid, &status, 0)) == -1 &&
+		while ((error = waitpid(pid, &status, 0)) == -1 &&
 			errno == EINTR);
-		if (rc < 0 || !WIFEXITED(status))
+		if (error < 0 || !WIFEXITED(status))
 			return (-1);
 
 		return (WEXITSTATUS(status));
@@ -701,7 +727,16 @@ libzfs_run_process(const char *path, char *argv[], int flags)
 	return (-1);
 }
 
-int
+/*
+ * Verify the required ZFS_DEV device is available and optionally attempt
+ * to load the ZFS modules.  Under normal circumstances the modules
+ * should already have been loaded by some external mechanism.
+ *
+ * Environment variables:
+ * - ZFS_MODULE_LOADING="YES|yes|ON|on" - Attempt to load modules.
+ * - ZFS_MODULE_TIMEOUT="<seconds>"     - Seconds to wait for ZFS_DEV
+ */
+static int
 libzfs_load_module(const char *module)
 {
 	char *argv[4] = {"/sbin/kextload", NULL, (char *)0};
@@ -802,8 +837,6 @@ libzfs_init(void)
 	if ((hdl->libzfs_mnttab = fopen(MNTTAB, "r")) == NULL) {
 #endif
 		(void) close(hdl->libzfs_fd);
-		(void) fprintf(stderr,
-		    gettext("mtab is not present at %s.\n"), MNTTAB);
 		free(hdl);
 		return (NULL);
 	}
@@ -947,6 +980,13 @@ int
 zfs_append_partition(char *path, size_t max_len)
 {
 	int len = strlen(path);
+
+	if (strncmp(path, UDISK_ROOT"/by-id",
+	    strlen(UDISK_ROOT) + 6) == 0 ||
+	    strncmp(path, UDISK_ROOT_ALT"/by-id",
+	    strlen(UDISK_ROOT_ALT) + 6) == 0) {
+		return (len);
+	}
 
 	if (strncmp(path, DISK_ROOT"/disk", strlen(DISK_ROOT) + 5) == 0) {
 		if (len + 2 >= max_len)
@@ -1126,8 +1166,9 @@ zcmd_alloc_dst_nvlist(libzfs_handle_t *hdl, zfs_cmd_t *zc, size_t len)
 	if (len == 0)
 		len = 16 * 1024;
 	zc->zc_nvlist_dst_size = len;
-	if ((zc->zc_nvlist_dst = (uint64_t)(uintptr_t)
-	    zfs_alloc(hdl, zc->zc_nvlist_dst_size)) == 0)
+	zc->zc_nvlist_dst =
+		(uint64_t)(uintptr_t)zfs_alloc(hdl, zc->zc_nvlist_dst_size);
+	if (zc->zc_nvlist_dst == 0)
 		return (-1);
 
 	return (0);
@@ -1142,8 +1183,9 @@ int
 zcmd_expand_dst_nvlist(libzfs_handle_t *hdl, zfs_cmd_t *zc)
 {
 	free((void *)(uintptr_t)zc->zc_nvlist_dst);
-	if ((zc->zc_nvlist_dst = (uint64_t)(uintptr_t)
-	    zfs_alloc(hdl, zc->zc_nvlist_dst_size)) == 0)
+	zc->zc_nvlist_dst =
+		(uint64_t)(uintptr_t)zfs_alloc(hdl, zc->zc_nvlist_dst_size);
+	if (zc->zc_nvlist_dst == 0)
 		return (-1);
 
 	return (0);
@@ -1158,6 +1200,9 @@ zcmd_free_nvlists(zfs_cmd_t *zc)
 	free((void *)(uintptr_t)zc->zc_nvlist_conf);
 	free((void *)(uintptr_t)zc->zc_nvlist_src);
 	free((void *)(uintptr_t)zc->zc_nvlist_dst);
+	zc->zc_nvlist_conf = NULL;
+	zc->zc_nvlist_src = NULL;
+	zc->zc_nvlist_dst = NULL;
 }
 
 static int
@@ -1636,6 +1681,16 @@ zprop_parse_value(libzfs_handle_t *hdl, nvpair_t *elem, int prop,
 			    "use 'none' to disable quota/refquota"));
 			goto error;
 		}
+
+		/*
+		 * Special handling for "*_limit=none". In this case it's not
+		 * 0 but UINT64_MAX.
+		 */
+		if ((type & ZFS_TYPE_DATASET) && isnone &&
+		    (prop == ZFS_PROP_FILESYSTEM_LIMIT ||
+		    prop == ZFS_PROP_SNAPSHOT_LIMIT)) {
+			*ivalp = UINT64_MAX;
+		}
 		break;
 
 	case PROP_TYPE_INDEX:
@@ -1689,7 +1744,7 @@ addlist(libzfs_handle_t *hdl, char *propname, zprop_list_t **listp,
 
 	prop = zprop_name_to_prop(propname, type);
 
-	if (prop != ZPROP_INVAL && !zprop_valid_for_type(prop, type, B_FALSE))
+	if (prop != ZPROP_INVAL && !zprop_valid_for_type(prop, type))
 		prop = ZPROP_INVAL;
 
 	/*

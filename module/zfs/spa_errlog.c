@@ -90,9 +90,8 @@ name_to_bookmark(char *buf, zbookmark_phys_t *zb)
  * during spa_errlog_sync().
  */
 void
-spa_log_error(spa_t *spa, zio_t *zio)
+spa_log_error_zb(spa_t *spa, zbookmark_phys_t *zb)
 {
-	zbookmark_phys_t *zb = &zio->io_logical->io_bookmark;
 	spa_error_entry_t search;
 	spa_error_entry_t *new;
 	avl_tree_t *tree;
@@ -129,6 +128,11 @@ spa_log_error(spa_t *spa, zio_t *zio)
 	mutex_exit(&spa->spa_errlist_lock);
 }
 
+void
+spa_log_error(spa_t *spa, zio_t *zio)
+{
+	return spa_log_error_zb(spa, &zio->io_logical->io_bookmark);
+}
 /*
  * Return the number of errors currently in the error log.  This is actually the
  * sum of both the last log and the current log, since we don't know the union
@@ -181,9 +185,9 @@ process_error_log(spa_t *spa, uint64_t obj, void *addr, size_t *count)
 
 		name_to_bookmark(za.za_name, &zb);
 
-		if (copyout(&zb, (user_addr_t) addr +
+		if (ddi_copyout(&zb, (void *) addr +
 		    (*count - 1) * sizeof (zbookmark_phys_t),
-		    sizeof (zbookmark_phys_t)) != 0) {
+						sizeof (zbookmark_phys_t), 0) != 0) {
 			zap_cursor_fini(&zc);
 			return (SET_ERROR(EFAULT));
 		}
@@ -206,9 +210,9 @@ process_error_list(avl_tree_t *list, void *addr, size_t *count)
 		if (*count == 0)
 			return (SET_ERROR(ENOMEM));
 
-		if (copyout(&se->se_bookmark, (user_addr_t)addr +
+		if (ddi_copyout(&se->se_bookmark, (void *)addr +
 		    (*count - 1) * sizeof (zbookmark_phys_t),
-		    sizeof (zbookmark_phys_t)) != 0)
+						sizeof (zbookmark_phys_t), 0) != 0)
 			return (SET_ERROR(EFAULT));
 
 		*count -= 1;

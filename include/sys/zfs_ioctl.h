@@ -20,7 +20,7 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2013 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
  */
 
 #ifndef	_SYS_ZFS_IOCTL_H
@@ -94,14 +94,17 @@ typedef enum drr_headertype {
  * Feature flags for zfs send streams (flags in drr_versioninfo)
  */
 
-#define	DMU_BACKUP_FEATURE_DEDUP		(1<<0)
-#define	DMU_BACKUP_FEATURE_DEDUPPROPS		(1<<1)
-#define	DMU_BACKUP_FEATURE_SA_SPILL		(1<<2)
-#define	DMU_BACKUP_FEATURE_ENCRYPT		(1<<3)
-#define	DMU_BACKUP_FEATURE_LABELED		(1<<4)
+#define	DMU_BACKUP_FEATURE_DEDUP		(1 << 0)
+#define	DMU_BACKUP_FEATURE_DEDUPPROPS		(1 << 1)
+#define	DMU_BACKUP_FEATURE_SA_SPILL		(1 << 2)
+#define	DMU_BACKUP_FEATURE_ENCRYPT		(1 << 3)
+#define	DMU_BACKUP_FEATURE_LABELED		(1 << 4)
 /* flags #3 - #15 are reserved for incompatible closed-source implementations */
-#define	DMU_BACKUP_FEATURE_EMBED_DATA		(1<<16)
-#define	DMU_BACKUP_FEATURE_EMBED_DATA_LZ4	(1<<17)
+#define	DMU_BACKUP_FEATURE_EMBED_DATA		(1 << 16)
+#define	DMU_BACKUP_FEATURE_EMBED_DATA_LZ4	(1 << 17)
+/* flag #18 is reserved for a Delphix feature */
+#define	DMU_BACKUP_FEATURE_LARGE_BLOCKS		(1 << 19)
+#define	DMU_BACKUP_FEATURE_RESUMING		(1 << 20)
 
     /* Unsure what Oracle called this bit */
 #define	DMU_BACKUP_FEATURE_SPILLBLOCKS	(0x20)
@@ -126,10 +129,16 @@ NOTE 3:  Fix to 7097870 (spill block can be dropped in some situations during
 #define	DMU_BACKUP_FEATURE_MASK	(DMU_BACKUP_FEATURE_DEDUP | \
     DMU_BACKUP_FEATURE_DEDUPPROPS | DMU_BACKUP_FEATURE_SA_SPILL | \
     DMU_BACKUP_FEATURE_ENCRYPT | DMU_BACKUP_FEATURE_LABELED | \
-    DMU_BACKUP_FEATURE_EMBED_DATA | DMU_BACKUP_FEATURE_EMBED_DATA_LZ4)
+    DMU_BACKUP_FEATURE_EMBED_DATA | DMU_BACKUP_FEATURE_EMBED_DATA_LZ4 | \
+    DMU_BACKUP_FEATURE_RESUMING | \
+    DMU_BACKUP_FEATURE_LARGE_BLOCKS)
 
 /* Are all features in the given flag word currently supported? */
 #define	DMU_STREAM_SUPPORTED(x)	(!((x) & ~DMU_BACKUP_FEATURE_MASK))
+
+typedef enum dmu_send_resume_token_version {
+	ZFS_SEND_RESUME_TOKEN_VERSION = 1
+} dmu_send_resume_token_version_t;
 
 /*
  * The drr_versioninfo field of the dmu_replay_record has the
@@ -152,6 +161,16 @@ NOTE 3:  Fix to 7097870 (spill block can be dropped in some situations during
 
 #define	DRR_FLAG_CLONE		(1<<0)
 #define	DRR_FLAG_CI_DATA	(1<<1)
+/*
+ * This send stream, if it is a full send, includes the FREE and FREEOBJECT
+ * records that are created by the sending process.  This means that the send
+ * stream can be received as a clone, eveqn though it is not an incremental.
+ * This is not implemented as a feature flag, because the receiving side does
+ * not need to have implemented it to receive this stream; it is fully backwards
+ * compatible.  We need a flag, though, because full send streams without it
+ * cannot necessarily be received as a clone correctly.
+ */
+#define	DRR_FLAG_FREERECORDS	(1<<2)
 
 /*
  * flags in the drr_checksumflags field in the DRR_WRITE and
@@ -160,17 +179,6 @@ NOTE 3:  Fix to 7097870 (spill block can be dropped in some situations during
 #define	DRR_CHECKSUM_DEDUP	(1<<0)
 
 #define	DRR_IS_DEDUP_CAPABLE(flags)	((flags) & DRR_CHECKSUM_DEDUP)
-
-		struct drr_begin {
-			uint64_t drr_magic;
-			uint64_t drr_versioninfo; /* was drr_version */
-			uint64_t drr_creation_time;
-			dmu_objset_type_t drr_type;
-			uint32_t drr_flags;
-			uint64_t drr_toguid;
-			uint64_t drr_fromguid;
-			char drr_toname[MAXNAMELEN];
-		} ;
 
 /*
  * zfs ioctl command structure
@@ -183,8 +191,6 @@ typedef struct dmu_replay_record {
 	} drr_type;
 	uint32_t drr_payloadlen;
 	union {
-		struct drr_begin drr_begin;
-#if 0
 		struct drr_begin {
 			uint64_t drr_magic;
 			uint64_t drr_versioninfo; /* was drr_version */
@@ -195,7 +201,6 @@ typedef struct dmu_replay_record {
 			uint64_t drr_fromguid;
 			char drr_toname[MAXNAMELEN];
 		} drr_begin;
-#endif
 		struct drr_end {
 			zio_cksum_t drr_checksum;
 			uint64_t drr_toguid;
@@ -273,6 +278,22 @@ typedef struct dmu_replay_record {
 			uint32_t drr_psize; /* compr. (real) size of payload */
 			/* (possibly compressed) content follows */
 		} drr_write_embedded;
+
+		/*
+		 * Nore: drr_checksum is overlaid with all record types
+		 * except DRR_BEGIN.  Therefore its (non-pad) members
+		 * must not overlap with members from the other structs.
+		 * We accomplish this by putting its members at the very
+		 * end of the struct.
+		 */
+		struct drr_checksum {
+			uint64_t drr_pad[34];
+			/*
+			 * fletcher-4 checksum of everything preceding the
+			 * checksum.
+			 */
+			zio_cksum_t drr_checksum;
+		} drr_checksum;
 	} drr_u;
 } dmu_replay_record_t;
 
@@ -307,6 +328,7 @@ typedef struct zinject_record {
 	uint32_t	zi_iotype;
 	int32_t		zi_duration;
 	uint64_t	zi_timer;
+	uint64_t	zi_nlanes;
 	uint32_t	zi_cmd;
 	uint32_t	zi_pad;
 } zinject_record_t;
@@ -379,7 +401,7 @@ typedef struct zfs_cmd {
 	uint64_t	zc_iflags;		/* internal to zfs(7fs) */
 	zfs_share_t	zc_share;
 	dmu_objset_stats_t zc_objset_stats;
-	struct drr_begin zc_begin_record;
+	dmu_replay_record_t zc_begin_record;
 	zinject_record_t zc_inject_record;
   zfs_ioc_crypto_t zc_crypto;
 	uint32_t	zc_defer_destroy;
@@ -387,14 +409,14 @@ typedef struct zfs_cmd {
 	uint32_t	zc_flags;
 	uint64_t	zc_action_handle;
 	int		zc_cleanup_fd;
-	uint8_t		zc_simple;
-	uint8_t		zc_pad[3];		/* alignment */
+	boolean_t       zc_resumable;
 	uint64_t	zc_sendobj;
 	uint64_t	zc_fromobj;
 	uint64_t	zc_createtxg;
 	zfs_stat_t	zc_stat;
     int             zc_ioc_error; /* ioctl error value */
     uint64_t        zc_dev;      /* OSX doesn't have ddi_driver_major*/
+	uint8_t         zc_simple;
 } zfs_cmd_t;
 
 

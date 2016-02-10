@@ -25,6 +25,7 @@
  * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
  * Copyright (c) 2012 by Frederik Wessels. All rights reserved.
  * Copyright (c) 2012 by Cyril Plisko. All rights reserved.
+ * Copyright (c) 2013 by Prasad Joshi (sTec). All rights reserved.
  */
 
 #include <assert.h>
@@ -225,7 +226,7 @@ get_usage(zpool_help_t idx) {
 	case HELP_DETACH:
 		return (gettext("\tdetach <pool> <device>\n"));
 	case HELP_EXPORT:
-		return (gettext("\texport [-f] <pool> ...\n"));
+		return (gettext("\texport [-af] <pool> ...\n"));
 	case HELP_HISTORY:
 		return (gettext("\thistory [-il] [<pool>] ...\n"));
 	case HELP_IMPORT:
@@ -239,8 +240,8 @@ get_usage(zpool_help_t idx) {
 		    "[-R root] [-F [-n]]\n"
 		    "\t    <pool | id> [newpool]\n"));
 	case HELP_IOSTAT:
-		return (gettext("\tiostat [-vL] [-T d|u] [pool] ... [interval "
-		    "[count]]\n"));
+		return (gettext("\tiostat [-v] [-T d|u] [-y] [pool] ... "
+		    "[interval [count]]\n"));
 	case HELP_LABELCLEAR:
 		return (gettext("\tlabelclear [-f] <vdev>\n"));
 	case HELP_LIST:
@@ -628,6 +629,10 @@ zpool_do_add(int argc, char **argv)
 
 	if (dryrun) {
 		nvlist_t *poolnvroot;
+		nvlist_t **l2child;
+		uint_t l2children, c;
+		char *vname;
+		boolean_t hadcache = B_FALSE;
 
 		verify(nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE,
 		    &poolnvroot) == 0);
@@ -645,6 +650,30 @@ zpool_do_add(int argc, char **argv)
 			print_vdev_tree(zhp, NULL, nvroot, 0, B_TRUE, 0);
 		} else if (num_logs(nvroot) > 0) {
 			print_vdev_tree(zhp, "logs", nvroot, 0, B_TRUE, 0);
+		}
+
+		/* Do the same for the caches */
+		if (nvlist_lookup_nvlist_array(poolnvroot, ZPOOL_CONFIG_L2CACHE,
+		    &l2child, &l2children) == 0 && l2children) {
+			hadcache = B_TRUE;
+			(void) printf(gettext("\tcache\n"));
+			for (c = 0; c < l2children; c++) {
+				vname = zpool_vdev_name(g_zfs, NULL,
+				    l2child[c], NULL);
+				(void) printf("\t  %s\n", vname);
+				free(vname);
+			}
+		}
+		if (nvlist_lookup_nvlist_array(nvroot, ZPOOL_CONFIG_L2CACHE,
+		    &l2child, &l2children) == 0 && l2children) {
+			if (!hadcache)
+				(void) printf(gettext("\tcache\n"));
+			for (c = 0; c < l2children; c++) {
+				vname = zpool_vdev_name(g_zfs, NULL,
+				    l2child[c], NULL);
+				(void) printf("\t  %s\n", vname);
+				free(vname);
+			}
 		}
 
 		ret = 0;
@@ -1224,9 +1253,39 @@ zpool_do_destroy(int argc, char **argv)
 	return (ret);
 }
 
+typedef struct export_cbdata {
+	boolean_t force;
+	boolean_t hardforce;
+} export_cbdata_t;
+
+/*
+ * Export one pool
+ */
+int
+zpool_export_one(zpool_handle_t *zhp, void *data)
+{
+	export_cbdata_t *cb = data;
+
+	if (zpool_disable_datasets(zhp, cb->force) != 0)
+		return (1);
+
+	/* The history must be logged as part of the export */
+	log_history = B_FALSE;
+
+	if (cb->hardforce) {
+		if (zpool_export_force(zhp, history_str) != 0)
+			return (1);
+	} else if (zpool_export(zhp, cb->force, history_str) != 0) {
+		return (1);
+	}
+
+	return (0);
+}
+
 /*
  * zpool export [-f] <pool> ...
  *
+ *	-a	Export all pools
  *	-f	Forcefully unmount datasets
  *
  * Export the given pools.  By default, the command will attempt to cleanly
@@ -1236,16 +1295,18 @@ zpool_do_destroy(int argc, char **argv)
 int
 zpool_do_export(int argc, char **argv)
 {
+	export_cbdata_t cb;
+	boolean_t do_all = B_FALSE;
 	boolean_t force = B_FALSE;
 	boolean_t hardforce = B_FALSE;
-	int c;
-	zpool_handle_t *zhp;
-	int ret;
-	int i;
+	int c, ret;
 
 	/* check options */
-	while ((c = getopt(argc, argv, "fF")) != -1) {
+	while ((c = getopt(argc, argv, "afF")) != -1) {
 		switch (c) {
+		case 'a':
+			do_all = B_TRUE;
+			break;
 		case 'f':
 			force = B_TRUE;
 			break;
@@ -1259,8 +1320,20 @@ zpool_do_export(int argc, char **argv)
 		}
 	}
 
+	cb.force = force;
+	cb.hardforce = hardforce;
 	argc -= optind;
 	argv += optind;
+
+	if (do_all) {
+		if (argc != 0) {
+			(void) fprintf(stderr, gettext("too many arguments\n"));
+			usage(B_FALSE);
+		}
+
+		return (for_each_pool(argc, argv, B_TRUE, NULL,
+		    zpool_export_one, &cb));
+	}
 
 	/* check arguments */
 	if (argc < 1) {
@@ -1268,31 +1341,7 @@ zpool_do_export(int argc, char **argv)
 		usage(B_FALSE);
 	}
 
-	ret = 0;
-	for (i = 0; i < argc; i++) {
-		if ((zhp = zpool_open_canfail(g_zfs, argv[i])) == NULL) {
-			ret = 1;
-			continue;
-		}
-
-		if (zpool_disable_datasets(zhp, force) != 0) {
-			ret = 1;
-			zpool_close(zhp);
-			continue;
-		}
-
-		/* The history must be logged as part of the export */
-		log_history = B_FALSE;
-
-		if (hardforce) {
-			if (zpool_export_force(zhp, history_str) != 0)
-				ret = 1;
-		} else if (zpool_export(zhp, force, history_str) != 0) {
-			ret = 1;
-		}
-
-		zpool_close(zhp);
-	}
+	ret = for_each_pool(argc, argv, B_TRUE, NULL, zpool_export_one, &cb);
 
 	return (ret);
 }
@@ -1981,7 +2030,7 @@ do_import(nvlist_t *config, const char *newname, const char *mntopts,
 	} else if (state != POOL_STATE_EXPORTED &&
 	    !(flags & ZFS_IMPORT_ANY_HOST)) {
 		uint64_t hostid = 0;
-		unsigned long system_hostid = gethostid() & 0xffffffff;
+		unsigned long system_hostid = get_system_hostid();
 
 		(void) nvlist_lookup_uint64(config, ZPOOL_CONFIG_HOSTID,
 		    &hostid);
@@ -2229,6 +2278,24 @@ zpool_do_import(int argc, char **argv)
 			(void) fprintf(stderr, gettext("too many arguments\n"));
 			usage(B_FALSE);
 		}
+
+#ifdef __APPLE__
+		/*
+		 * Check for the SYS_CONFIG privilege. We do this explicitly
+		 * here because otherwise any attempt to import -a all pools
+		 * will report "no pools available to import" or silently fail
+		 * if a cache file is also specified.
+		 */
+		if (!priv_ineffect(PRIV_SYS_CONFIG)) {
+			(void) fprintf(stderr, gettext("cannot import pools: "
+			    "permission denied\n"));
+			if (searchdirs != NULL)
+				free(searchdirs);
+
+			nvlist_free(policy);
+			return (1);
+		}
+#endif /* __APPLE__ */
 	} else {
 		if (argc > 2) {
 			(void) fprintf(stderr, gettext("too many arguments\n"));
@@ -2236,7 +2303,7 @@ zpool_do_import(int argc, char **argv)
 		}
 
 		/*
-		 * Check for the SYS_CONFIG privilege.  We do this explicitly
+		 * Check for the SYS_CONFIG privilege. We do this explicitly
 		 * here because otherwise any attempt to discover pools will
 		 * silently fail.
 		 */
@@ -2249,6 +2316,22 @@ zpool_do_import(int argc, char **argv)
 			nvlist_free(policy);
 			return (1);
 		}
+#ifdef __APPLE__
+		/*
+		 * Check for the SYS_CONFIG privilege.  We do this explicitly
+		 * here because otherwise any attempt to import the pool will
+		 * report "no such pool available."
+		 */
+		if (argc > 0 && !priv_ineffect(PRIV_SYS_CONFIG)) {
+			(void) fprintf(stderr, gettext("cannot "
+			    "import pools: permission denied\n"));
+			if (searchdirs != NULL)
+				free(searchdirs);
+
+			nvlist_free(policy);
+			return (1);
+		}
+#endif /* __APPLE__ */
 	}
 
 	/*
@@ -2269,8 +2352,10 @@ zpool_do_import(int argc, char **argv)
 
 		errno = 0;
 		searchguid = strtoull(argv[0], &endptr, 10);
-		if (errno != 0 || *endptr != '\0')
+		if (errno != 0 || *endptr != '\0') {
 			searchname = argv[0];
+			searchguid = 0;
+		}
 		found_config = NULL;
 
 		/*
@@ -2843,9 +2928,10 @@ zpool_do_iostat(int argc, char **argv)
 	boolean_t print_guid = B_FALSE;
 	boolean_t follow_links = B_FALSE;
 	iostat_cbdata_t cb = { 0 };
+	boolean_t omit_since_boot = B_FALSE;
 
 	/* check options */
-	while ((c = getopt(argc, argv, "T:vL")) != -1) {
+	while ((c = getopt(argc, argv, "T:vLy")) != -1) {
 		switch (c) {
 		case 'T':
 			get_timestamp_arg(*optarg);
@@ -2855,6 +2941,9 @@ zpool_do_iostat(int argc, char **argv)
 			break;
 		case 'L':
 			follow_links = B_TRUE;
+			break;
+		case 'y':
+			omit_since_boot = B_TRUE;
 			break;
 		case '?':
 			(void) fprintf(stderr, gettext("invalid option '%c'\n"),
@@ -2899,11 +2988,16 @@ zpool_do_iostat(int argc, char **argv)
 	cb.cb_namewidth = 0;
 
 	for (;;) {
-		pool_list_update(list);
-
 		if ((npools = pool_list_count(list)) == 0)
 			(void) fprintf(stderr, gettext("no pools available\n"));
 		else {
+			/*
+			 * If this is the first iteration and -y was supplied
+			 * we skip any printing.
+			 */
+			boolean_t skip = (omit_since_boot &&
+				cb.cb_iteration == 0);
+
 			/*
 			 * Refresh all statistics.  This is done as an
 			 * explicit step before calculating the maximum name
@@ -2925,11 +3019,17 @@ zpool_do_iostat(int argc, char **argv)
 				print_timestamp(timestamp_fmt);
 
 			/*
-			 * If it's the first time, or verbose mode, print the
-			 * header.
+			 * If it's the first time and we're not skipping it,
+			 * or either skip or verbose mode, print the header.
 			 */
-			if (++cb.cb_iteration == 1 || verbose)
+			if ((++cb.cb_iteration == 1 && !skip) ||
+				(skip != verbose))
 				print_iostat_header(&cb);
+
+			if (skip) {
+				(void) sleep(interval);
+				continue;
+			}
 
 			(void) pool_list_iter(list, B_FALSE, print_iostat, &cb);
 
@@ -3308,17 +3408,10 @@ zpool_do_list(int argc, char **argv)
 	if (zprop_get_list(g_zfs, props, &cb.cb_proplist, ZFS_TYPE_POOL) != 0)
 		usage(B_FALSE);
 
-	if ((list = pool_list_get(argc, argv, &cb.cb_proplist, &ret)) == NULL)
-		return (1);
-
-	if (argc == 0 && !cb.cb_scripted && pool_list_count(list) == 0) {
-		(void) printf(gettext("no pools available\n"));
-		zprop_free_list(cb.cb_proplist);
-		return (0);
-	}
-
 	for (;;) {
-		pool_list_update(list);
+		if ((list = pool_list_get(argc, argv, &cb.cb_proplist,
+		    &ret)) == NULL)
+			return (1);
 
 		if (pool_list_count(list) == 0)
 			break;
@@ -3338,9 +3431,16 @@ zpool_do_list(int argc, char **argv)
 		if (count != 0 && --count == 0)
 			break;
 
+		pool_list_free(list);
 		(void) sleep(interval);
 	}
 
+	if (argc == 0 && !cb.cb_scripted && pool_list_count(list) == 0) {
+		(void) printf(gettext("no pools available\n"));
+		ret = 0;
+	}
+
+	pool_list_free(list);
 	zprop_free_list(cb.cb_proplist);
 	return (ret);
 }
@@ -4788,8 +4888,8 @@ upgrade_version(zpool_handle_t *zhp, uint64_t version)
 		return (ret);
 
 	if (unsupp_fs) {
-		(void) printf(gettext("Upgrade not performed due to %d "
-		    "unsupported filesystems (max v%d).\n"),
+		(void) fprintf(stderr, gettext("Upgrade not performed due "
+		    "to %d unsupported filesystems (max v%d).\n"),
 		    unsupp_fs, (int) ZPL_VERSION);
 		return (1);
 	}
@@ -5003,7 +5103,7 @@ upgrade_one(zpool_handle_t *zhp, void *data)
 	int ret;
 
 	if (strcmp("log", zpool_get_name(zhp)) == 0) {
-		(void) printf(gettext("'log' is now a reserved word\n"
+		(void) fprintf(stderr, gettext("'log' is now a reserved word\n"
 		    "Pool 'log' must be renamed using export and import"
 		    " to upgrade.\n"));
 		return (1);
@@ -5142,7 +5242,8 @@ zpool_do_upgrade(int argc, char **argv)
 		    "---------------\n");
 		for (i = 0; i < SPA_FEATURES; i++) {
 			zfeature_info_t *fi = &spa_feature_table[i];
-			const char *ro = fi->fi_can_readonly ?
+			const char *ro =
+			    (fi->fi_flags & ZFEATURE_FLAG_READONLY_COMPAT) ?
 			    " (read-only compatible)" : "";
 
 			(void) printf("%-37s%s\n", fi->fi_uname, ro);
@@ -5956,6 +6057,8 @@ main(int argc, char **argv)
 	(void) setlocale(LC_ALL, "");
 	//(void) textdomain(TEXT_DOMAIN);
 
+	dprintf_setup(&argc, argv);
+
 	opterr = 0;
 
 	/*
@@ -5974,14 +6077,10 @@ main(int argc, char **argv)
 	if ((strcmp(cmdname, "-?") == 0) || strcmp(cmdname, "--help") == 0)
 		usage(B_TRUE);
 
-#ifdef __OPPLE__
-	if (getuid())
-		printf("ZFS requires 'root' user permission to work on OS X.\n"
-		    "Precede the command with 'sudo' and try again.\n");
-#endif /* __OPPLE__ */
-
-	if ((g_zfs = libzfs_init()) == NULL)
+	if ((g_zfs = libzfs_init()) == NULL) {
+		(void) fprintf(stderr, "%s", libzfs_error_init(errno));
 		return (1);
+	}
 
 	libzfs_print_on_error(g_zfs, B_TRUE);
 

@@ -13,28 +13,19 @@
 #include "IDMediaPathLinker.hpp"
 
 #include "IDDiskArbitrationUtils.hpp"
-#include "IDFileUtils.hpp"
-
-#include <iostream>
-#include <algorithm>
 
 namespace ID
 {
-	MediaPathLinker::MediaPathLinker(std::string base) :
-		m_base(std::move(base))
+	MediaPathLinker::MediaPathLinker(std::string const & base, ASLClient const & logger) :
+		BaseLinker(base, logger)
 	{
-		createPath(m_base);
 	}
 
 	static std::string prefixDevice = "IODeviceTree:/";
 
 	static std::string filterMediaPath(std::string const & mediaPath)
 	{
-		if (mediaPath.size() < prefixDevice.size())
-			return std::string();
-		auto r = std::mismatch(mediaPath.begin(), mediaPath.end(),
-							   prefixDevice.begin());
-		if (r.second != prefixDevice.end())
+		if (mediaPath.compare(0, prefixDevice.size(), prefixDevice) != 0)
 			return std::string();
 		std::string filteredPath = mediaPath.substr(prefixDevice.size());
 		std::replace(filteredPath.begin(), filteredPath.end(), '/', '-');
@@ -46,36 +37,7 @@ namespace ID
 		std::string mediaPath = filterMediaPath(di.mediaPath);
 		if (!mediaPath.empty() && !di.mediaBSDName.empty())
 		{
-			try
-			{
-				mediaPath = m_base + "/" + mediaPath;
-				std::string devicePath = "/dev/" + di.mediaBSDName;
-				std::cout << "Creating symlink: \"" << mediaPath << "\" -> " << devicePath << std::endl;
-				createSymlink(mediaPath, devicePath);
-			}
-			catch (std::exception const & e)
-			{
-				std::cerr << "Could not create symlink: " << e.what() << std::endl;
-			}
+			addLinkForDisk(base() + "/" + mediaPath, di);
 		}
 	}
-
-	void MediaPathLinker::diskDisappeared(DADiskRef disk, DiskInformation const & di)
-	{
-		std::string mediaPath = filterMediaPath(di.mediaPath);
-		if (!mediaPath.empty())
-		{
-			try
-			{
-				mediaPath = m_base + "/" + mediaPath;
-				std::cout << "Removing symlink: \"" << mediaPath << "\"" << std::endl;
-				removeFSObject(mediaPath);
-			}
-			catch (std::exception const & e)
-			{
-				std::cerr << "Could not remove symlink: " << e.what() << std::endl;
-			}
-		}
-	}
-
 }

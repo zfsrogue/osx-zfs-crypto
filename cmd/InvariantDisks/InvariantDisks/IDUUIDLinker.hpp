@@ -13,23 +13,17 @@
 #ifndef ID_UUIDLINKER_HPP
 #define ID_UUIDLINKER_HPP
 
-#include "IDDiskArbitrationHandler.hpp"
-
-#include <string>
+#include "IDBaseLinker.hpp"
 
 namespace ID
 {
-	class UUIDLinker : public DiskArbitrationHandler
+	class UUIDLinker : public BaseLinker
 	{
 	public:
-		UUIDLinker(std::string base);
+		explicit UUIDLinker(std::string const & base, ASLClient const & logger);
 
 	public:
 		virtual void diskAppeared(DADiskRef disk, DiskInformation const & info) override;
-		virtual void diskDisappeared(DADiskRef disk, DiskInformation const & info) override;
-
-	private:
-		std::string m_base;
 	};
 }
 

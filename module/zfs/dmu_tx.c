@@ -21,7 +21,7 @@
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
- * Copyright (c) 2013 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
  */
 
 #include <sys/dmu.h>
@@ -38,6 +38,7 @@
 #include <sys/sa_impl.h>
 #include <sys/zfs_context.h>
 #include <sys/varargs.h>
+#include <sys/trace_dmu.h>
 
 typedef void (*dmu_tx_hold_func_t)(dmu_tx_t *tx, struct dnode *dn,
     uint64_t arg1, uint64_t arg2);
@@ -61,7 +62,7 @@ static kstat_t *dmu_tx_ksp;
 dmu_tx_t *
 dmu_tx_create_dd(dsl_dir_t *dd)
 {
-	dmu_tx_t *tx = kmem_zalloc(sizeof (dmu_tx_t), KM_PUSHPAGE);
+	dmu_tx_t *tx = kmem_zalloc(sizeof (dmu_tx_t), KM_SLEEP);
 	tx->tx_dir = dd;
 	if (dd != NULL)
 		tx->tx_pool = dd->dd_pool;
@@ -140,7 +141,7 @@ dmu_tx_hold_object_impl(dmu_tx_t *tx, objset_t *os, uint64_t object,
 		}
 	}
 
-	txh = kmem_zalloc(sizeof (dmu_tx_hold_t), KM_PUSHPAGE);
+	txh = kmem_zalloc(sizeof (dmu_tx_hold_t), KM_SLEEP);
 	txh->txh_tx = tx;
 	txh->txh_dnode = dn;
 #ifdef DEBUG_DMU_TX
@@ -240,7 +241,7 @@ dmu_tx_count_write(dmu_tx_hold_t *txh, uint64_t off, uint64_t len)
 		return;
 
 	min_bs = SPA_MINBLOCKSHIFT;
-	max_bs = SPA_MAXBLOCKSHIFT;
+	max_bs = highbit64(txh->txh_tx->tx_objset->os_recordsize) - 1;
 	min_ibs = DN_MIN_INDBLKSHIFT;
 	max_ibs = DN_MAX_INDBLKSHIFT;
 
@@ -309,6 +310,14 @@ dmu_tx_count_write(dmu_tx_hold_t *txh, uint64_t off, uint64_t len)
 			 */
 			ASSERT(dn->dn_datablkshift != 0);
 			min_bs = max_bs = dn->dn_datablkshift;
+		} else {
+			/*
+			 * The blocksize can increase up to the recordsize,
+			 * or if it is already more than the recordsize,
+			 * up to the next power of 2.
+			 */
+			min_bs = highbit64(dn->dn_datablksz - 1);
+			max_bs = MAX(max_bs, highbit64(dn->dn_datablksz - 1));
 		}
 
 		/*
@@ -323,7 +332,7 @@ dmu_tx_count_write(dmu_tx_hold_t *txh, uint64_t off, uint64_t len)
 			dmu_buf_impl_t *db;
 
 			rw_enter(&dn->dn_struct_rwlock, RW_READER);
-			err = dbuf_hold_impl(dn, 0, start, FALSE, FTAG, &db);
+			err = dbuf_hold_impl(dn, 0, start, FALSE, FALSE, FTAG, &db);
 			rw_exit(&dn->dn_struct_rwlock);
 
 			if (err) {
@@ -419,7 +428,7 @@ dmu_tx_hold_write(dmu_tx_t *tx, uint64_t object, uint64_t off, int len)
 	dmu_tx_hold_t *txh;
 
 	ASSERT(tx->tx_txg == 0);
-	ASSERT(len < DMU_MAX_ACCESS);
+	ASSERT(len <= DMU_MAX_ACCESS);
 	ASSERT(len == 0 || UINT64_MAX - off >= len - 1);
 
 	txh = dmu_tx_hold_object_impl(tx, tx->tx_objset,
@@ -524,7 +533,7 @@ dmu_tx_count_free(dmu_tx_hold_t *txh, uint64_t off, uint64_t len)
 		blkoff = P2PHASE(blkid, epb);
 		tochk = MIN(epb - blkoff, nblks);
 
-		err = dbuf_hold_impl(dn, 1, blkid >> epbs, FALSE, FTAG, &dbuf);
+		err = dbuf_hold_impl(dn, 1, blkid >> epbs, FALSE, FALSE, FTAG, &dbuf);
 		if (err) {
 			txh->txh_tx->tx_err = err;
 			break;
@@ -697,7 +706,7 @@ dmu_tx_hold_free(dmu_tx_t *tx, uint64_t object, uint64_t off, uint64_t len)
 			uint64_t ibyte = i << shift;
 			err = dnode_next_offset(dn, 0, &ibyte, 2, 1, 0);
 			i = ibyte >> shift;
-			if (err == ESRCH)
+			if (err == ESRCH || i > end)
 				break;
 			if (err) {
 				tx->tx_err = err;
@@ -725,6 +734,7 @@ dmu_tx_hold_zap(dmu_tx_t *tx, uint64_t object, int add, const char *name)
 {
 	dmu_tx_hold_t *txh;
 	dnode_t *dn;
+	dsl_dataset_phys_t *ds_phys;
 	uint64_t nblocks;
 	int epbs, err;
 
@@ -770,11 +780,11 @@ dmu_tx_hold_zap(dmu_tx_t *tx, uint64_t object, int add, const char *name)
 		bp = &dn->dn_phys->dn_blkptr[0];
 		if (dsl_dataset_block_freeable(dn->dn_objset->os_dsl_dataset,
 		    bp, bp->blk_birth))
-			txh->txh_space_tooverwrite += SPA_MAXBLOCKSIZE;
+			txh->txh_space_tooverwrite += MZAP_MAX_BLKSZ;
 		else
-			txh->txh_space_towrite += SPA_MAXBLOCKSIZE;
+			txh->txh_space_towrite += MZAP_MAX_BLKSZ;
 		if (!BP_IS_HOLE(bp))
-			txh->txh_space_tounref += SPA_MAXBLOCKSIZE;
+			txh->txh_space_tounref += MZAP_MAX_BLKSZ;
 		return;
 	}
 
@@ -799,8 +809,9 @@ dmu_tx_hold_zap(dmu_tx_t *tx, uint64_t object, int add, const char *name)
 	 * we'll have to modify an indirect twig for each.
 	 */
 	epbs = dn->dn_indblkshift - SPA_BLKPTRSHIFT;
+	ds_phys = dsl_dataset_phys(dn->dn_objset->os_dsl_dataset);
 	for (nblocks = dn->dn_maxblkid >> epbs; nblocks != 0; nblocks >>= epbs)
-		if (dn->dn_objset->os_dsl_dataset->ds_phys->ds_prev_snap_obj)
+		if (ds_phys->ds_prev_snap_obj)
 			txh->txh_space_towrite += 3 << dn->dn_indblkshift;
 		else
 			txh->txh_space_tooverwrite += 3 << dn->dn_indblkshift;
@@ -951,7 +962,8 @@ dmu_tx_dirty_buf(dmu_tx_t *tx, dmu_buf_impl_t *db)
 				match_object = TRUE;
 				break;
 			default:
-				ASSERT(!"bad txh_type");
+				cmn_err(CE_PANIC, "bad txh_type %d",
+				    txh->txh_type);
 			}
 		}
 		if (match_object && match_offset) {
@@ -1285,6 +1297,8 @@ dmu_tx_assign(dmu_tx_t *tx, txg_how_t txg_how)
 	    txg_how == TXG_WAITED);
 	ASSERT(!dsl_pool_sync_context(tx->tx_pool));
 
+	VERIFY0(dsl_pool_sync_context(tx->tx_pool));
+
 	if (txg_how == TXG_WAITED)
 		tx->tx_waited = B_TRUE;
 
@@ -1493,7 +1507,7 @@ dmu_tx_callback_register(dmu_tx_t *tx, dmu_tx_callback_func_t *func, void *data)
 {
 	dmu_tx_callback_t *dcb;
 
-	dcb = kmem_alloc(sizeof (dmu_tx_callback_t), KM_PUSHPAGE);
+	dcb = kmem_alloc(sizeof (dmu_tx_callback_t), KM_SLEEP);
 
 	dcb->dcb_func = func;
 	dcb->dcb_data = data;
@@ -1569,18 +1583,18 @@ dmu_tx_hold_spill(dmu_tx_t *tx, uint64_t object)
 
 	/* If blkptr doesn't exist then add space to towrite */
 	if (!(dn->dn_phys->dn_flags & DNODE_FLAG_SPILL_BLKPTR)) {
-		txh->txh_space_towrite += SPA_MAXBLOCKSIZE;
+		txh->txh_space_towrite += SPA_OLD_MAXBLOCKSIZE;
 	} else {
 		blkptr_t *bp;
 
 		bp = &dn->dn_phys->dn_spill;
 		if (dsl_dataset_block_freeable(dn->dn_objset->os_dsl_dataset,
 		    bp, bp->blk_birth))
-			txh->txh_space_tooverwrite += SPA_MAXBLOCKSIZE;
+			txh->txh_space_tooverwrite += SPA_OLD_MAXBLOCKSIZE;
 		else
-			txh->txh_space_towrite += SPA_MAXBLOCKSIZE;
+			txh->txh_space_towrite += SPA_OLD_MAXBLOCKSIZE;
 		if (!BP_IS_HOLE(bp))
-			txh->txh_space_tounref += SPA_MAXBLOCKSIZE;
+			txh->txh_space_tounref += SPA_OLD_MAXBLOCKSIZE;
 	}
 }
 

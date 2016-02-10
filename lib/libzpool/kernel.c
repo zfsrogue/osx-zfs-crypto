@@ -139,6 +139,9 @@ zk_thread_helper(void *arg)
 	VERIFY3S(pthread_mutex_lock(&kthread_lock), ==, 0);
 	kthread_nr++;
 	VERIFY3S(pthread_mutex_unlock(&kthread_lock), ==, 0);
+#ifdef LINUX
+	(void) setpriority(PRIO_PROCESS, 0, kt->t_pri);
+#endif
 
 	kt->t_tid = pthread_self();
 	((thread_func_arg_t) kt->t_func)(kt->t_arg);
@@ -162,6 +165,9 @@ zk_thread_create(caddr_t stk, size_t stksize, thread_func_t func, void *arg,
 	kt = umem_zalloc(sizeof (kthread_t), UMEM_NOFAIL);
 	kt->t_func = func;
 	kt->t_arg = arg;
+#ifdef LINUX
+	kt->t_pri = pri;
+#endif
 
 	VERIFY0(pthread_attr_init(&attr));
 	VERIFY0(pthread_attr_setdetachstate(&attr, detachstate));
@@ -301,7 +307,7 @@ mutex_destroy(kmutex_t *mp)
 {
 	ASSERT3U(mp->m_magic, ==, MTX_MAGIC);
 	ASSERT3P(mp->m_owner, ==, MTX_INIT);
-	VERIFY3S(pthread_mutex_destroy(&(mp)->m_lock), ==, 0);
+	ASSERT0(pthread_mutex_destroy(&(mp)->m_lock));
 	mp->m_owner = MTX_DEST;
 	mp->m_magic = 0;
 }
@@ -906,6 +912,9 @@ dprintf_setup(int *argc, char **argv)
 	 */
 	if (dprintf_find_string("on"))
 		dprintf_print_all = 1;
+
+	if (dprintf_string != NULL)
+		zfs_flags |= ZFS_DEBUG_DPRINTF;
 }
 
 /*
@@ -1170,6 +1179,30 @@ umem_out_of_memory(void)
 	return (0);
 }
 
+static unsigned long
+get_spl_hostid(void)
+{
+	FILE *f;
+	unsigned long hostid;
+
+	f = fopen("/sys/module/spl/parameters/spl_hostid", "r");
+	if (!f)
+		return (0);
+	if (fscanf(f, "%lu", &hostid) != 1)
+		hostid = 0;
+	fclose(f);
+	return (hostid & 0xffffffff);
+}
+
+unsigned long
+get_system_hostid(void)
+{
+	unsigned long system_hostid = get_spl_hostid();
+	if (system_hostid == 0)
+		system_hostid = gethostid() & 0xffffffff;
+	return (system_hostid);
+}
+
 void
 kernel_init(int mode)
 {
@@ -1187,7 +1220,7 @@ kernel_init(int mode)
 	    (double)physmem * PAGESIZE / (1ULL << 30));
 
 	(void) snprintf(hw_serial, sizeof (hw_serial), "%ld",
-	    (mode & FWRITE) ? gethostid() : 0);
+	    (mode & FWRITE) ? get_system_hostid() : 0);
 
 	VERIFY((random_fd = open("/dev/random", O_RDONLY)) != -1);
 	VERIFY((urandom_fd = open("/dev/urandom", O_RDONLY)) != -1);
@@ -1244,6 +1277,10 @@ crgetgroups(cred_t *cr)
 {
 	return (NULL);
 }
+
+void
+crgetgroupsfree(gid_t *gids)
+{}
 
 int
 zfs_secpolicy_snapshot_perms(const char *name, cred_t *cr)

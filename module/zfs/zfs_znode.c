@@ -21,6 +21,8 @@
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2013 by Delphix. All rights reserved.
+ * Portions Copyright 2007-2009 Apple Inc. All rights reserved.
+ * Use is subject to license terms.
  */
 
 /* Portions Copyright 2007 Jeremy Teo */
@@ -56,6 +58,7 @@
 #endif /* _KERNEL */
 
 #include <sys/dmu.h>
+#include <sys/dmu_objset.h>
 #include <sys/refcount.h>
 #include <sys/stat.h>
 #include <sys/zap.h>
@@ -75,8 +78,6 @@ SYSCTL_INT(_debug_sizeof, OID_AUTO, znode, CTLFLAG_RD, 0, sizeof (znode_t),
 #endif
 void
 zfs_release_sa_handle(sa_handle_t *hdl, dmu_buf_t *db, void *tag);
-extern uint64_t vnop_num_reclaims;
-
 
 
 // #define dprintf printf
@@ -173,13 +174,13 @@ zfs_znode_cache_constructor(void *buf, void *arg, int kmflags)
 #endif
 
 	list_link_init(&zp->z_link_node);
-	list_link_init(&zp->z_link_reclaim_node);
 
 	mutex_init(&zp->z_lock, NULL, MUTEX_DEFAULT, NULL);
 	rw_init(&zp->z_map_lock, NULL, RW_DEFAULT, NULL);
 	rw_init(&zp->z_parent_lock, NULL, RW_DEFAULT, NULL);
 	rw_init(&zp->z_name_lock, NULL, RW_DEFAULT, NULL);
 	mutex_init(&zp->z_acl_lock, NULL, MUTEX_DEFAULT, NULL);
+	rw_init(&zp->z_xattr_lock, NULL, RW_DEFAULT, NULL);
 
 	mutex_init(&zp->z_range_lock, NULL, MUTEX_DEFAULT, NULL);
 	avl_create(&zp->z_range_avl, zfs_range_compare,
@@ -187,6 +188,7 @@ zfs_znode_cache_constructor(void *buf, void *arg, int kmflags)
 
 	zp->z_dirlocks = NULL;
 	zp->z_acl_cached = NULL;
+	zp->z_xattr_cached = NULL;
 	zp->z_moved = 0;
 	zp->z_fastpath = B_FALSE;
 	return (0);
@@ -206,11 +208,13 @@ zfs_znode_cache_destructor(void *buf, void *arg)
 	rw_destroy(&zp->z_parent_lock);
 	rw_destroy(&zp->z_name_lock);
 	mutex_destroy(&zp->z_acl_lock);
+	rw_destroy(&zp->z_xattr_lock);
 	avl_destroy(&zp->z_range_avl);
 	mutex_destroy(&zp->z_range_lock);
 
 	ASSERT(zp->z_dirlocks == NULL);
 	ASSERT(zp->z_acl_cached == NULL);
+	ASSERT(zp->z_xattr_cached == NULL);
 }
 
 #ifdef	ZNODE_STATS
@@ -402,7 +406,9 @@ void
 zfs_znode_init(void)
 {
 	/*
-	 * Initialize zcache
+	 * Initialize zcache.  The KMC_SLAB hint is used in order that it be
+	 * backed by kmalloc() when on the Linux slab in order that any
+	 * wait_on_bit() operations on the related inode operate properly.
 	 */
 	rw_init(&zfsvfs_lock, NULL, RW_DEFAULT, NULL);
 	ASSERT(znode_cache == NULL);
@@ -548,8 +554,6 @@ zfs_create_share_dir(zfsvfs_t *zfsvfs, dmu_tx_t *tx)
 	vattr.va_gid = crgetgid(kcred);
 
 	sharezp = kmem_cache_alloc(znode_cache, KM_SLEEP);
-	//zfs_znode_cache_constructor(sharezp, zfsvfs->z_parent->z_vfs, 0);
-	ASSERT(!POINTER_IS_VALID(sharezp->z_zfsvfs));
 	sharezp->z_moved = 0;
 	sharezp->z_unlinked = 0;
 	sharezp->z_atime_dirty = 0;
@@ -729,7 +733,9 @@ zfs_znode_alloc(zfsvfs_t *zfsvfs, dmu_buf_t *db, int blksz,
 	zp->z_uid = 0;
 	zp->z_gid = 0;
 	zp->z_size = 0;
-	zp->z_finder_hardlink_name[0] = 0;
+	zp->z_name_cache[0] = 0;
+	zp->z_finder_parentid = 0;
+	zp->z_finder_hardlink = FALSE;
 
 	vp = ZTOV(zp); /* Does nothing in OSX */
 
@@ -821,7 +827,68 @@ zfs_znode_alloc(zfsvfs_t *zfsvfs, dmu_buf_t *db, int blksz,
 
 #else /* APPLE */
 
-	zfs_znode_getvnode(zp, zfsvfs, &vp); /* Assigns both vp and z_vnode */
+#ifdef APPLE_SA_RECOVER
+	/*
+	 * We have had some SA corruption, making for invalid entries. We
+	 * attempt to handle this situation here, by not creating invalid
+	 * type vnodes.
+	 */
+	if (zfs_recover) {
+		if (( IFTOVT((mode_t)mode) == VNON) ||
+			( IFTOVT((mode_t)mode) > VCPLX)) {
+
+			printf("ZFS: WARNING! objid %llu has invalid SA data, please restore from backup. (mode %x)\n",
+				   zp->z_id, (int)zp->z_mode);
+
+			zp->z_mode = 0;
+
+			uint64_t parent = zfsvfs->z_recover_parent;
+			if (parent)	{
+
+				zap_cursor_t zc;
+				zap_attribute_t *za;
+				int err;
+				uint64_t mask =  ZFS_DIRENT_OBJ(-1ULL);
+
+				za = kmem_alloc(sizeof (zap_attribute_t), KM_SLEEP);
+				for (zap_cursor_init(&zc, zfsvfs->z_os, parent);
+					 (err = zap_cursor_retrieve(&zc, za)) == 0;
+					 zap_cursor_advance(&zc)) {
+					if ((za->za_first_integer & mask) == (zp->z_id & mask)) {
+						uint32_t vtype = DTTOVT(ZFS_DIRENT_TYPE(za->za_first_integer));
+						printf("ZFS: correct vtype is %d\n", vtype);
+						zp->z_mode = VTTOIF(vtype);
+						zp->z_size = 0;
+						break;
+                }
+				}
+				zap_cursor_fini(&zc);
+				kmem_free(za, sizeof (zap_attribute_t));
+			}
+			// Last ditch effort
+			if (!zp->z_mode) zp->z_mode = VTTOIF(VREG);
+
+#include <sys/dbuf.h>
+
+		dmu_buf_impl_t *db2 = (dmu_buf_impl_t *)db;
+		zbookmark_phys_t zb;
+
+        // Log error in spa?
+
+		SET_BOOKMARK(&zb, db2->db_objset->os_dsl_dataset ?
+					 db2->db_objset->os_dsl_dataset->ds_object :
+					 DMU_META_OBJSET,
+					 db2->db.db_object, db2->db_level, db2->db_blkid);
+
+		spa_log_error_zb(db2->db_objset->os_spa, &zb);
+
+		} // bad vtype
+
+	} // zfs_recover
+
+#endif /* APPLE_SA_RECOVER */
+
+
 
 #endif /* Apple */
 
@@ -863,6 +930,18 @@ static zfs_acl_phys_t acl_phys;
  *
  *	OUT:	zpp	- allocated znode
  *
+ * OS X implementation notes:
+ *
+ * The caller of zfs_mknode() is expected to call zfs_znode_getvnode()
+ * AFTER the dmu_tx_commit() is performed.  This prevents deadlocks
+ * since vnode_create can indirectly attempt to clean a dirty vnode.
+ *
+ * The current list of callers includes:
+ *      zfs_vnop_create
+ *      zfs_vnop_mkdir
+ *      zfs_vnop_symlink
+ *      zfs_obtain_xattr
+ *      zfs_make_xattrdir
  */
 void
 zfs_mknode(znode_t *dzp, vattr_t *vap, dmu_tx_t *tx, cred_t *cr,
@@ -1008,7 +1087,7 @@ zfs_mknode(znode_t *dzp, vattr_t *vap, dmu_tx_t *tx, cred_t *cr,
 	 * order for  DMU_OT_ZNODE is critical since it needs to be constructed
 	 * in the old znode_phys_t format.  Don't change this ordering
 	 */
-	sa_attrs = kmem_alloc(sizeof (sa_bulk_attr_t) * ZPL_END, KM_PUSHPAGE);
+	sa_attrs = kmem_alloc(sizeof (sa_bulk_attr_t) * ZPL_END, KM_SLEEP);
 
 	if (obj_type == DMU_OT_ZNODE) {
 		SA_ADD_BULK_ATTR(sa_attrs, cnt, SA_ZPL_ATIME(zfsvfs),
@@ -1089,19 +1168,15 @@ zfs_mknode(znode_t *dzp, vattr_t *vap, dmu_tx_t *tx, cred_t *cr,
 	VERIFY(sa_replace_all_by_template(sa_hdl, sa_attrs, cnt, tx) == 0);
 
 	if (!(flag & IS_ROOT_NODE)) {
-
 		/*
 		 * We must not hold any locks while calling vnode_create inside
 		 * zfs_znode_alloc(), as it may call either of vnop_reclaim, or
-		 * vnop_fsync.
+		 * vnop_fsync. If it is not enough to just release ZFS_OBJ_HOLD
+		 * we will have to attach the vnode after the dmu_commit like
+		 * maczfs does, in each vnop caller.
 		 */
-		// zfs_release_sa_handle(sa_hdl, db, FTAG);
 		*zpp = zfs_znode_alloc(zfsvfs, db, 0, obj_type, sa_hdl);
 		ASSERT(*zpp != NULL);
-		// ZFS_OBJ_HOLD_ENTER(zfsvfs, obj);
-		// VERIFY(0 == sa_buf_hold(zfsvfs->z_os, obj, NULL, &db));
-		// VERIFY(0 == sa_handle_get_from_db(zfsvfs->z_os, db, NULL,
-		// SA_HDL_SHARED, &sa_hdl));
 	} else {
 		/*
 		 * If we are creating the root node, the "parent" we
@@ -1137,7 +1212,6 @@ zfs_mknode(znode_t *dzp, vattr_t *vap, dmu_tx_t *tx, cred_t *cr,
 
 	kmem_free(sa_attrs, sizeof (sa_bulk_attr_t) * ZPL_END);
 	ZFS_OBJ_HOLD_EXIT(zfsvfs, obj);
-	getnewvnode_drop_reserve();
 }
 
 /*
@@ -1236,19 +1310,19 @@ zfs_xvattr_set(znode_t *zp, xvattr_t *xvap, dmu_tx_t *tx)
 }
 
 int
-zfs_zget(zfsvfs_t *zfsvfs, uint64_t obj_num, znode_t **zpp)
+zfs_zget_ext(zfsvfs_t *zfsvfs, uint64_t obj_num, znode_t **zpp,
+			 int flags)
 {
 	dmu_object_info_t doi;
 	dmu_buf_t	*db;
 	znode_t		*zp;
 	struct vnode		*vp = NULL;
 	sa_handle_t	*hdl;
-	struct thread	*td;
 	int err;
+	uint32_t        vid;
 
 	dprintf("+zget %lld\n", obj_num);
 
-	td = curthread;
 	getnewvnode_reserve(1);
 
 again:
@@ -1286,108 +1360,85 @@ again:
 		 * should never find a sa handle that doesn't
 		 * know about the znode.
 		 */
-
 		ASSERT3P(zp, !=, NULL);
 
+		mutex_enter(&zp->z_lock);
+
 		/*
-		 * We can only call getwithvid if vp is not NULL
+		 * Since zp may disappear after we unlock below,
+		 * we save a copy of vp and it's vid
 		 */
-		if (ZTOV(zp)) {
-			/* Standard ZFS code here */
+		vid = zp->z_vid;
+		vp = ZTOV(zp);
 
-			mutex_enter(&zp->z_lock);
-			ASSERT3U(zp->z_id, ==, obj_num);
-			if (zp->z_unlinked) {
-				err = (ENOENT);
-			} else {
-				vp = ZTOV(zp);
-				*zpp = zp;
-				err = 0;
-			}
+		/*
+		 * Since we do immediate eviction of the z_dbuf, we
+		 * should never find a dbuf with a znode that doesn't
+		 * know about the dbuf.
+		 */
+		ASSERT3U(zp->z_id, ==, obj_num);
 
-			if (err == 0) {
-
-				dprintf("attaching vnode %p\n", vp);
-
-				/*
-				 * zfs_free_node() sets z_vnode to NULL when called inside
-				 * the znodes_lock, so we check against that here to ensure
-				 * it is not NULL
-				 */
-				if (!vp || (vnode_getwithvid(vp, zp->z_vid) != 0)) {
-					mutex_exit(&zp->z_lock);
-					sa_buf_rele(db, NULL);
-					ZFS_OBJ_HOLD_EXIT(zfsvfs, obj_num);
-					dprintf("zfs: vnode_getwithvid err\n");
-					goto again;
-				}
-			}
+		/*
+		 * OS X can return the znode when the file is unlinked
+		 * in order to support the sync of open-unlinked files
+		 */
+		if (!(flags & ZGET_FLAG_UNLINKED) && zp->z_unlinked) {
 			mutex_exit(&zp->z_lock);
 			sa_buf_rele(db, NULL);
 			ZFS_OBJ_HOLD_EXIT(zfsvfs, obj_num);
-			getnewvnode_drop_reserve();
-			return (err);
+			return (ENOENT);
+		}
+
+		mutex_exit(&zp->z_lock);
+		sa_buf_rele(db, NULL);
+		ZFS_OBJ_HOLD_EXIT(zfsvfs, obj_num);
+
+		if ((flags & ZGET_FLAG_WITHOUT_VNODE_GET)) {
+			/* Do not increase vnode iocount */
+			*zpp = zp;
+			return 0;
+		}
+
+		/* We are racing zfs_znode_getvnode() and we got here first, we
+		 * need to let it get ahead */
+		if (!vp) {
+			kpreempt(KPREEMPT_SYNC);
+			dprintf("zget racing attach\n");
+			goto again;
+		}
+
+		/* Due to vnode_create() -> zfs_fsync() -> zil_commit() -> zget()
+		 * -> vnode_getwithvid() -> deadlock. Unsure why vnode_getwithvid()
+		 * ends up sleeping in msleep() but vnode_get() does not.
+		 */
+		if (!vp || (err=vnode_getwithvid(vp, vid) != 0)) {
+			//if ((err = vnode_get(vp)) != 0) {
+			dprintf("ZFS: vnode_get() returned %d\n", err);
+			kpreempt(KPREEMPT_SYNC);
+			goto again;
 		}
 
 		/*
-		 * We have this strange race in OSX where vnop_reclaim has
-		 * been called so we released vp, and placed zp on reclaim
-		 * list. But reclaim has not yet removed it from the
-		 * reclaim-list so it is still around.  When we detect this
-		 * here, we force a reclaim right now, then go a head and
-		 * allocate a new zp
+		 * Since we had to drop all of our locks above, make sure
+		 * that we have the vnode and znode we had before.
 		 */
+		mutex_enter(&zp->z_lock);
+		if ((vid != zp->z_vid) || (vp != ZTOV(zp))) {
+			mutex_exit(&zp->z_lock);
+			/* Release the wrong vp from vnode_getwithvid(). This
+			 * call is missing in 10a286 - lundman */
+			VN_RELE(vp);
+			dprintf("ZFS: the vids do not match part 1\n");
+			goto again;
+		}
+		if (vnode_vid(vp) != zp->z_vid)
+			printf("ZFS: the vids do not match\n");
+		mutex_exit(&zp->z_lock);
 
-		/* VP is NULL */
-
-		/* Clean up locks */
-		sa_buf_rele(db, NULL);
-		ZFS_OBJ_HOLD_EXIT(zfsvfs, obj_num);
+		*zpp = zp;
 		getnewvnode_drop_reserve();
-
-		dprintf("Waiting on zp %p to die!\n", zp);
-
-		/*
-		 * We will do direct reclaim of the zp we want, so we can
-		 * re-acquire the vnode it needs. This means stealing it
-		 * from the reclaim thread, if it is still in the list.
-		 * We can not access "zp" directly here, as it may already
-		 * have been released, so we grab the mutex, run through the
-		 * reclaim list, if it in the list, we can safely take it out
-		 * and reclaim it here.
-		 */
-		mutex_enter(&zfsvfs->z_reclaim_list_lock);
-		for (znode_t *rzp = list_head(&zfsvfs->z_reclaim_znodes) ;
-			 rzp;
-			 rzp = list_next(&zfsvfs->z_reclaim_znodes, rzp)) {
-
-			if (rzp == zp) {
-
-				dprintf("Removing from reclaim list zp %p\n", zp);
-                list_remove(&zfsvfs->z_reclaim_znodes, zp);
-				mutex_exit(&zfsvfs->z_reclaim_list_lock);
-
-#ifdef _KERNEL
-				atomic_dec_64(&vnop_num_reclaims);
-#endif
-				rw_enter(&zfsvfs->z_teardown_inactive_lock, RW_READER);
-				if (zp->z_sa_hdl == NULL)
-					zfs_znode_free(zp);
-				else
-					zfs_zinactive(zp);
-				rw_exit(&zfsvfs->z_teardown_inactive_lock);
-				goto again;
-
-            }
-
-		} // for
-		mutex_exit(&zfsvfs->z_reclaim_list_lock);
-		/* We have just looked through the entire list and not found
-		 * the zp, so it must have already been reclaimed.
-		 */
-		goto again;
-
-	} /* HDL != NULL */
+		return (0);
+	} // if vnode != NULL
 
 	/*
 	 * Not found create new znode/vnode
@@ -1407,9 +1458,13 @@ again:
 
 	if (zp == NULL) {
 		err = SET_ERROR(ENOENT);
-	} else {
-		*zpp = zp;
+		ZFS_OBJ_HOLD_EXIT(zfsvfs, obj_num);
+		getnewvnode_drop_reserve();
+		dprintf("zget returning %d\n", err);
+		return (err);
 	}
+	*zpp = zp;
+
 	if (err == 0) {
 #ifndef __APPLE__ /* Already associated with mount from vnode_create */
 		struct vnode *vp = ZTOV(zp);
@@ -1427,9 +1482,25 @@ again:
 	}
 	ZFS_OBJ_HOLD_EXIT(zfsvfs, obj_num);
 	getnewvnode_drop_reserve();
+
+	if ((flags & ZGET_FLAG_WITHOUT_VNODE) ||
+		(flags & ZGET_FLAG_WITHOUT_VNODE_GET))	{
+		/* Insert it on our list of active znodes */
+		//mutex_enter(&zfsvfs->z_znodes_lock);
+		//list_insert_tail(&zfsvfs->z_all_znodes, zp);
+		//membar_producer();
+		//mutex_exit(&zfsvfs->z_znodes_lock);
+		if (flags & ZGET_FLAG_WITHOUT_VNODE_GET)
+			printf("ZFS: zget without vnode in znodealloc case\n");
+	} else {
+		/* Attach a vnode to our new znode */
+		zfs_znode_getvnode(zp, zfsvfs); /* Assigns both vp and z_vnode */
+	}
+
 	dprintf("zget returning %d\n", err);
 	return (err);
 }
+
 
 int
 zfs_rezget(znode_t *zp)
@@ -1456,19 +1527,20 @@ zfs_rezget(znode_t *zp)
 
 	dprintf("rezget: %p %p %p\n", zp, zp->z_xattr_lock,
 	    zp->z_xattr_parent);
-#ifdef __LINUX__
+
 	rw_enter(&zp->z_xattr_lock, RW_WRITER);
 	if (zp->z_xattr_cached) {
 		nvlist_free(zp->z_xattr_cached);
 		zp->z_xattr_cached = NULL;
 	}
 
+#ifdef __LINUX__
 	if (zp->z_xattr_parent) {
 		VN_RELE(ZTOI(zp->z_xattr_parent));
 		zp->z_xattr_parent = NULL;
 	}
-	rw_exit(&zp->z_xattr_lock);
 #endif
+	rw_exit(&zp->z_xattr_lock);
 
 	ASSERT(zp->z_sa_hdl == NULL);
 	err = sa_buf_hold(zfsvfs->z_os, obj_num, NULL, &db);
@@ -1573,23 +1645,37 @@ zfs_znode_delete(znode_t *zp, dmu_tx_t *tx)
 void
 zfs_zinactive(znode_t *zp)
 {
+	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
+	uint64_t z_id = zp->z_id;
 	ASSERT(zp->z_sa_hdl);
 
 	/*
-	 * These locks may already be taken by ourselves, through vnode_create
-	 * reentry.
+	 * Don't allow a zfs_zget() while were trying to release this znode
 	 */
+	ZFS_OBJ_HOLD_ENTER(zfsvfs, z_id);
+
+	mutex_enter(&zp->z_lock);
+
+	/* Solaris checks to see if a reference was grabbed to the vnode here
+	 * which we can not easily do in XNU */
+	//if (ZTOV(zp) && vnode_isinuse(ZTOV(zp), 0)) {
+	//	printf("ZFS: zinactive(%p) has non-zero vp reference!\n", zp);
+	//}
 
 	/*
 	 * If this was the last reference to a file with no links,
 	 * remove the file from the file system.
 	 */
 	if (zp->z_unlinked) {
+		mutex_exit(&zp->z_lock);
+		ZFS_OBJ_HOLD_EXIT(zfsvfs, z_id);
 		zfs_rmnode(zp);
 		return;
 	}
 
+	mutex_exit(&zp->z_lock);
 	zfs_znode_dmu_fini(zp);
+	ZFS_OBJ_HOLD_EXIT(zfsvfs, z_id);
 	zfs_znode_free(zp);
 }
 
@@ -1597,6 +1683,17 @@ void
 zfs_znode_free(znode_t *zp)
 {
 	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
+
+#if 1 /* detect if we are about to release something actually locked */
+	uint64_t *mp = (uint64_t *)&zp->z_lock;
+	/* we know first entry in SPL mutex is "owner" and if mutex has been freed,
+	 * it should be 0.
+	 */
+	if (mp[0] != 0) {
+		panic("ZFS: about to znode_free a zp %p with active mutex %llx\n",
+			  zp, mp[0]);
+	}
+#endif
 
 	mutex_enter(&zfsvfs->z_znodes_lock);
 	zp->z_vnode = NULL;
@@ -1607,6 +1704,11 @@ zfs_znode_free(znode_t *zp)
 	if (zp->z_acl_cached) {
 		zfs_acl_free(zp->z_acl_cached);
 		zp->z_acl_cached = NULL;
+	}
+
+	if (zp->z_xattr_cached) {
+		nvlist_free(zp->z_xattr_cached);
+		zp->z_xattr_cached = NULL;
 	}
 
 	kmem_cache_free(znode_cache, zp);
@@ -1805,8 +1907,13 @@ zfs_extend(znode_t *zp, uint64_t end)
 		 * We are growing the file past the current block size.
 		 */
 		if (zp->z_blksz > zp->z_zfsvfs->z_max_blksz) {
+			/*
+			 * File's blocksize is already larger than the
+			 * "recordsize" property.  Only let it grow to
+			 * the next power of 2.
+			 */
 			ASSERT(!ISP2(zp->z_blksz));
-			newblksz = MIN(end, SPA_MAXBLOCKSIZE);
+			newblksz = MIN(end, 1 << highbit64(zp->z_blksz));
 		} else {
 			newblksz = MIN(end, zp->z_zfsvfs->z_max_blksz);
 		}
@@ -2278,9 +2385,6 @@ zfs_create_fs(objset_t *os, cred_t *cr, nvlist_t *zplprops, dmu_tx_t *tx)
 	mutex_init(&zfsvfs.z_znodes_lock, NULL, MUTEX_DEFAULT, NULL);
 	list_create(&zfsvfs.z_all_znodes, sizeof (znode_t),
 	    offsetof(znode_t, z_link_node));
-	mutex_init(&zfsvfs.z_reclaim_list_lock, NULL, MUTEX_DEFAULT, NULL);
-	list_create(&zfsvfs.z_reclaim_znodes, sizeof (znode_t),
-	    offsetof(znode_t, z_link_reclaim_node));
 
 	for (i = 0; i != ZFS_OBJ_MTX_SZ; i++)
 		mutex_init(&zfsvfs.z_hold_mtx[i], NULL, MUTEX_DEFAULT, NULL);
@@ -2474,7 +2578,7 @@ zfs_obj_to_path_impl(objset_t *osp, uint64_t obj, sa_handle_t *hdl,
 
 		component[0] = '/';
 		if (is_xattrdir) {
-			(void) snprintf(component + 1, MAXNAMELEN+2,
+			(void) snprintf(component + 1, MAXNAMELEN+1,
 			    "<xattrdir>");
 		} else {
 			error = zap_value_search(osp, pobj, obj,

@@ -111,6 +111,7 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	uint32_t blksize;
 	int fmode = 0;
 	int error = 0;
+	int isssd;
 
 	/*
 	 * We must have a pathname, and it must be absolute.
@@ -212,6 +213,17 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 		goto out;
 	}
 
+
+	int len = MAXPATHLEN;
+	if (vn_getpath(devvp, dvd->vd_readlinkname, &len) == 0) {
+		dprintf("ZFS: '%s' resolved name is '%s'\n",
+			   vd->vdev_path, dvd->vd_readlinkname);
+	} else {
+		dvd->vd_readlinkname[0] = 0;
+	}
+
+
+
 skip_open:
 	/*
 	 * Determine the actual size of the device.
@@ -268,6 +280,16 @@ skip_open:
 	 */
 	vd->vdev_nowritecache = B_FALSE;
 
+	/* Inform the ZIO pipeline that we are non-rotational */
+	vd->vdev_nonrot = B_FALSE;
+	if (VNOP_IOCTL(devvp, DKIOCISSOLIDSTATE, (caddr_t)&isssd, 0,
+				   context) == 0) {
+		if (isssd)
+			vd->vdev_nonrot = B_TRUE;
+	}
+	dprintf("ZFS: vdev_disk(%s) isSSD %d\n", vd->vdev_path ? vd->vdev_path : "",
+			isssd);
+
 	dvd->vd_devvp = devvp;
 out:
 	if (error) {
@@ -283,6 +305,22 @@ out:
 	if (error) printf("ZFS: vdev_disk_open('%s') failed error %d\n",
 					  vd->vdev_path ? vd->vdev_path : "", error);
 	return (error);
+}
+
+
+
+/*
+ * It appears on export/reboot, iokit can hold a lock, then call our
+ * termination handler, and we end up locking-against-ourselves inside
+ * IOKit. We are then forced to make the vnode_close() call be async.
+ */
+static void vdev_disk_close_thread(void *arg)
+{
+	struct vnode *vp = arg;
+
+	(void) vnode_close(vp, 0,
+					   spl_vfs_context_kernel());
+	thread_exit();
 }
 
 /* Not static so zfs_osx.cpp can call it on device removal */
@@ -316,8 +354,9 @@ vdev_disk_close(vdev_t *vd)
 		/* vnode_close() can stall during removal, so clear vd_devvp now */
 		struct vnode *vp = dvd->vd_devvp;
 		dvd->vd_devvp = NULL;
-		(void) vnode_close(vp, spa_mode(vd->vdev_spa),
-						   spl_vfs_context_kernel());
+		(void) thread_create(NULL, 0, vdev_disk_close_thread,
+							 vp, 0, &p0,
+							 TS_RUN, minclsyspri);
 	}
 #endif
 
@@ -353,7 +392,7 @@ vdev_disk_io_intr(struct buf *bp, void *arg)
 	}
 	buf_free(bp);
 
-	zio_interrupt(zio);
+	zio_delay_interrupt(zio);
 }
 
 static void
@@ -366,7 +405,7 @@ vdev_disk_ioctl_done(void *zio_arg, int error)
 	zio_interrupt(zio);
 }
 
-static int
+static void
 vdev_disk_io_start(zio_t *zio)
 {
 	vdev_t *vd = zio->io_vd;
@@ -382,71 +421,97 @@ vdev_disk_io_start(zio_t *zio)
 	if (dvd == NULL || (dvd->vd_offline) || dvd->vd_devvp == NULL) {
 		zio->io_error = ENXIO;
 		zio_interrupt(zio);
-		return (ZIO_PIPELINE_CONTINUE);
+		return;
 	}
 
-	if (zio->io_type == ZIO_TYPE_IOCTL) {
+	switch (zio->io_type) {
+		case ZIO_TYPE_IOCTL:
 
-		if (!vdev_readable(vd)) {
-			zio->io_error = SET_ERROR(ENXIO);
-			return (ZIO_PIPELINE_CONTINUE);
-		}
-
-		switch (zio->io_cmd) {
-
-		case DKIOCFLUSHWRITECACHE:
-
-			if (zfs_nocacheflush)
-				break;
-
-			if (vd->vdev_nowritecache) {
-				zio->io_error = SET_ERROR(ENOTSUP);
-				break;
+			if (!vdev_readable(vd)) {
+				zio->io_error = SET_ERROR(ENXIO);
+				zio_interrupt(zio);
+				return;
 			}
 
-			context = vfs_context_create(spl_vfs_context_kernel());
-			error = VNOP_IOCTL(dvd->vd_devvp, DKIOCSYNCHRONIZECACHE,
-			    NULL, FWRITE, context);
-			(void) vfs_context_rele(context);
+			switch (zio->io_cmd) {
 
-			if (error == 0)
-				vdev_disk_ioctl_done(zio, error);
-			else
-				error = ENOTSUP;
+				case DKIOCFLUSHWRITECACHE:
 
-			if (error == 0) {
-				/*
-				 * The ioctl will be done asychronously,
-				 * and will call vdev_disk_ioctl_done()
-				 * upon completion.
-				 */
-				return (ZIO_PIPELINE_STOP);
-			} else if (error == ENOTSUP || error == ENOTTY) {
-				/*
-				 * If we get ENOTSUP or ENOTTY, we know that
-				 * no future attempts will ever succeed.
-				 * In this case we set a persistent bit so
-				 * that we don't bother with the ioctl in the
-				 * future.
-				 */
-				vd->vdev_nowritecache = B_TRUE;
-			}
-			zio->io_error = error;
+					if (zfs_nocacheflush)
+						break;
 
-			break;
+					if (vd->vdev_nowritecache) {
+						zio->io_error = SET_ERROR(ENOTSUP);
+						break;
+					}
+
+					context = vfs_context_create(spl_vfs_context_kernel());
+					error = VNOP_IOCTL(dvd->vd_devvp, DKIOCSYNCHRONIZECACHE,
+									   NULL, FWRITE, context);
+					(void) vfs_context_rele(context);
+
+					if (error == 0)
+						vdev_disk_ioctl_done(zio, error);
+					else
+						error = ENOTSUP;
+
+					if (error == 0) {
+						/*
+						 * The ioctl will be done asychronously,
+						 * and will call vdev_disk_ioctl_done()
+						 * upon completion.
+						 */
+						return;
+					} else if (error == ENOTSUP || error == ENOTTY) {
+						/*
+						 * If we get ENOTSUP or ENOTTY, we know that
+						 * no future attempts will ever succeed.
+						 * In this case we set a persistent bit so
+						 * that we don't bother with the ioctl in the
+						 * future.
+						 */
+						vd->vdev_nowritecache = B_TRUE;
+					}
+					zio->io_error = error;
+
+					break;
+
+				default:
+					zio->io_error = SET_ERROR(ENOTSUP);
+			} /* io_cmd */
+
+			zio_execute(zio);
+			return;
+
+	case ZIO_TYPE_WRITE:
+		if (zio->io_priority == ZIO_PRIORITY_SYNC_WRITE)
+			flags = B_WRITE;
+		else
+			flags = B_WRITE | B_ASYNC;
+		break;
+
+	case ZIO_TYPE_READ:
+		if (zio->io_priority == ZIO_PRIORITY_SYNC_READ)
+			flags = B_READ;
+		else
+			flags = B_READ | B_ASYNC;
+		break;
 
 		default:
 			zio->io_error = SET_ERROR(ENOTSUP);
-		}
+			zio_interrupt(zio);
+			return;
+	} /* io_type */
 
-		return (ZIO_PIPELINE_CONTINUE);
-	}
+	ASSERT(zio->io_type == ZIO_TYPE_READ || zio->io_type == ZIO_TYPE_WRITE);
 
-	flags = (zio->io_type == ZIO_TYPE_READ ? B_READ : B_WRITE);
+	/* Stop OSX from also caching our data */
 	flags |= B_NOCACHE;
 
 	if (zio->io_flags & ZIO_FLAG_FAILFAST)
 		flags |= B_FAILFAST;
+
+	zio->io_target_timestamp = zio_handle_io_delay(zio);
 
 	bp = buf_alloc(dvd->vd_devvp);
 
@@ -476,7 +541,11 @@ vdev_disk_io_start(zio_t *zio)
 	error = VNOP_STRATEGY(bp);
 	ASSERT(error == 0);
 
-	return (ZIO_PIPELINE_STOP);
+	if (error) {
+		zio->io_error = error;
+		zio_interrupt(zio);
+		return;
+	}
 }
 
 static void

@@ -28,6 +28,7 @@
 #include <unistd.h>
 #include <sys/file.h>
 #include <sys/mount.h>
+#include <sys/mntent.h>
 #include <sys/stat.h>
 #include <libzfs.h>
 #include <locale.h>
@@ -244,7 +245,7 @@ parse_dataset(char *dataset)
 		if (fd < 0)
 			goto out;
 
-		error = zpool_read_label(fd, &config);
+		error = zpool_read_label(fd, &config, NULL);
 		(void) close(fd);
 		if (error)
 			goto out;
@@ -464,8 +465,10 @@ main(int argc, char **argv)
 	if (zfsflags & ZS_ZFSUTIL)
 		zfsutil = 1;
 
-	if ((g_zfs = libzfs_init()) == NULL)
+	if ((g_zfs = libzfs_init()) == NULL) {
+		(void) fprintf(stderr, "%s", libzfs_error_init(errno));
 		return (MOUNT_SYSERR);
+	}
 
 	/* try to open the dataset to access the mount point */
 	if ((zhp = zfs_open(g_zfs, dataset,
@@ -495,10 +498,13 @@ main(int argc, char **argv)
 			    ZFS_PROP_SELINUX_ROOTCONTEXT, MNTOPT_ROOTCONTEXT,
 			    mntopts, mtabopt);
 		} else {
-			__zfs_selinux_setcontext(MNTOPT_CONTEXT,
-			    prop, mntopts, mtabopt);
+			append_mntopt(MNTOPT_CONTEXT, prop,
+			    mntopts, mtabopt, B_TRUE);
 		}
 	}
+
+	/* A hint used to determine an auto-mounted snapshot mount point */
+	append_mntopt(MNTOPT_MNTPOINT, mntpoint, mntopts, NULL, B_FALSE);
 
 	/* treat all snapshots as legacy mount points */
 	if (zfs_get_type(zhp) == ZFS_TYPE_SNAPSHOT)

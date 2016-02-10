@@ -21,6 +21,7 @@
 
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, Joyent, Inc. All rights reserved.
  * Copyright (c) 2013 by Delphix. All rights reserved.
  * Copyright (c) 2012 DEY Storage Systems, Inc.  All rights reserved.
  * Copyright (c) 2012 Pawel Jakub Dawidek <pawel@dawidek.net>.
@@ -893,7 +894,8 @@ zfs_which_resv_prop(zfs_handle_t *zhp, zfs_prop_t *resv_prop)
  */
 nvlist_t *
 zfs_valid_proplist(libzfs_handle_t *hdl, zfs_type_t type, nvlist_t *nvl,
-    uint64_t zoned, zfs_handle_t *zhp, const char *errbuf)
+    uint64_t zoned, zfs_handle_t *zhp, zpool_handle_t *zpool_hdl,
+	const char *errbuf)
 {
 	nvpair_t *elem;
 	uint64_t intval;
@@ -1041,7 +1043,7 @@ zfs_valid_proplist(libzfs_handle_t *hdl, zfs_type_t type, nvlist_t *nvl,
 			goto error;
 		}
 
-		if (!zfs_prop_valid_for_type(prop, type, B_FALSE)) {
+		if (!zfs_prop_valid_for_type(prop, type)) {
 			zfs_error_aux(hdl,
 			    dgettext(TEXT_DOMAIN, "'%s' does not "
 			    "apply to datasets of this type"), propname);
@@ -1083,21 +1085,36 @@ zfs_valid_proplist(libzfs_handle_t *hdl, zfs_type_t type, nvlist_t *nvl,
 			break;
 		}
 
-		case ZFS_PROP_RECORDSIZE:
 		case ZFS_PROP_VOLBLOCKSIZE:
-			/* must be power of two within SPA_{MIN,MAX}BLOCKSIZE */
+		case ZFS_PROP_RECORDSIZE:
+		{
+			int maxbs = SPA_MAXBLOCKSIZE;
+			if (zpool_hdl != NULL) {
+				maxbs = zpool_get_prop_int(zpool_hdl,
+				    ZPOOL_PROP_MAXBLOCKSIZE, NULL);
+			}
+			/*
+			 * Volumes are limited to a volblocksize of 128KB,
+			 * because they typically service workloads with
+			 * small random writes, which incur a large performance
+			 * penalty with large blocks.
+			 */
+			if (prop == ZFS_PROP_VOLBLOCKSIZE)
+				maxbs = SPA_OLD_MAXBLOCKSIZE;
+			/*
+			 * The value must be a power of two between
+			 * SPA_MINBLOCKSIZE and maxbs.
+			 */
 			if (intval < SPA_MINBLOCKSIZE ||
-			    intval > SPA_MAXBLOCKSIZE || !ISP2(intval)) {
+				intval > maxbs || !ISP2(intval)) {
 				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-				    "'%s' must be power of 2 from %u "
-				    "to %uk"), propname,
-				    (uint_t)SPA_MINBLOCKSIZE,
-				    (uint_t)SPA_MAXBLOCKSIZE >> 10);
+					"'%s' must be power of 2 from 512B "
+					"to %uKB"), propname, maxbs >> 10);
 				(void) zfs_error(hdl, EZFS_BADPROP, errbuf);
 				goto error;
 			}
 			break;
-
+		}
 		case ZFS_PROP_MLSLABEL:
 		{
 #ifdef HAVE_MLSLABEL
@@ -1578,6 +1595,12 @@ zfs_setprop_error(libzfs_handle_t *hdl, zfs_prop_t prop, int err,
 		(void) zfs_error(hdl, EZFS_DSREADONLY, errbuf);
 		break;
 
+	case E2BIG:
+		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+		    "property value too long"));
+		(void) zfs_error(hdl, EZFS_BADPROP, errbuf);
+		break;
+
 	case ENOTSUP:
 		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 		    "pool and or dataset must be upgraded to set this "
@@ -1586,10 +1609,17 @@ zfs_setprop_error(libzfs_handle_t *hdl, zfs_prop_t prop, int err,
 		break;
 
 	case ERANGE:
-		if (prop == ZFS_PROP_COMPRESSION) {
+		if (prop == ZFS_PROP_COMPRESSION ||
+		    prop == ZFS_PROP_RECORDSIZE) {
 			(void) zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 			    "property setting is not allowed on "
 			    "bootable datasets"));
+			(void) zfs_error(hdl, EZFS_NOTSUP, errbuf);
+		} else if (prop == ZFS_PROP_CHECKSUM ||
+                   prop == ZFS_PROP_DEDUP) {
+			(void) zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+				"property setting is not allowed on "
+				"root pools"));
 			(void) zfs_error(hdl, EZFS_NOTSUP, errbuf);
 		} else {
 			(void) zfs_standard_error(hdl, err, errbuf);
@@ -1620,6 +1650,195 @@ zfs_setprop_error(libzfs_handle_t *hdl, zfs_prop_t prop, int err,
 	}
 }
 
+/*
+ * Given a property name and value, set the property for the given dataset.
+ */
+int
+zfs_prop_set(zfs_handle_t *zhp, const char *propname, const char *propval)
+{
+	int ret = -1;
+	char errbuf[1024];
+	libzfs_handle_t *hdl = zhp->zfs_hdl;
+	nvlist_t *nvl = NULL;
+
+	(void) snprintf(errbuf, sizeof (errbuf),
+					dgettext(TEXT_DOMAIN, "cannot set property for '%s'"),
+					zhp->zfs_name);
+
+	if (nvlist_alloc(&nvl, NV_UNIQUE_NAME, 0) != 0 ||
+		nvlist_add_string(nvl, propname, propval) != 0) {
+		(void) no_memory(hdl);
+		goto error;
+	}
+
+	ret = zfs_prop_set_list(zhp, nvl);
+
+  error:
+	nvlist_free(nvl);
+	return (ret);
+}
+
+/*
+ * Given an nvlist of property names and values, set the properties for the
+ * given dataset.
+ */
+int
+zfs_prop_set_list(zfs_handle_t *zhp, nvlist_t *props)
+{
+	zfs_cmd_t zc = { { 0 } };
+	int ret = -1;
+	prop_changelist_t **cls = NULL;
+	int cl_idx;
+	char errbuf[1024];
+	libzfs_handle_t *hdl = zhp->zfs_hdl;
+	nvlist_t *nvl;
+	int nvl_len;
+	int added_resv;
+
+	(void) snprintf(errbuf, sizeof (errbuf),
+					dgettext(TEXT_DOMAIN, "cannot set property for '%s'"),
+					zhp->zfs_name);
+
+	if ((nvl = zfs_valid_proplist(hdl, zhp->zfs_type, props,
+				  zfs_prop_get_int(zhp, ZFS_PROP_ZONED), zhp, zhp->zpool_hdl,
+				  errbuf)) == NULL)
+		goto error;
+	/*
+	 * We have to check for any extra properties which need to be added
+	 * before computing the length of the nvlist.
+	 */
+	for (nvpair_t *elem = nvlist_next_nvpair(nvl, NULL);
+		 elem != NULL;
+		 elem = nvlist_next_nvpair(nvl, elem)) {
+		if (zfs_name_to_prop(nvpair_name(elem)) == ZFS_PROP_VOLSIZE &&
+			(added_resv = zfs_add_synthetic_resv(zhp, nvl)) == -1) {
+			goto error;
+		}
+	}
+	/*
+	 * Check how many properties we're setting and allocate an array to
+	 * store changelist pointers for postfix().
+	 */
+	nvl_len = 0;
+	for (nvpair_t *elem = nvlist_next_nvpair(nvl, NULL);
+		 elem != NULL;
+		 elem = nvlist_next_nvpair(nvl, elem))
+		nvl_len++;
+	if ((cls = calloc(nvl_len, sizeof (prop_changelist_t *))) == NULL)
+		goto error;
+
+	cl_idx = 0;
+	for (nvpair_t *elem = nvlist_next_nvpair(nvl, NULL);
+		 elem != NULL;
+		 elem = nvlist_next_nvpair(nvl, elem)) {
+		zfs_prop_t prop = zfs_name_to_prop(nvpair_name(elem));
+
+		assert(cl_idx < nvl_len);
+		/*
+		 * We don't want to unmount & remount the dataset when changing
+		 * its canmount property to 'on' or 'noauto'.  We only use
+		 * the changelist logic to unmount when setting canmount=off.
+		 */
+		if (!(prop == ZFS_PROP_CANMOUNT &&
+			  fnvpair_value_uint64(elem) != ZFS_CANMOUNT_OFF)) {
+			cls[cl_idx] = changelist_gather(zhp, prop, 0, 0);
+			if (cls[cl_idx] == NULL)
+				goto error;
+		}
+
+		if (prop == ZFS_PROP_MOUNTPOINT &&
+			changelist_haszonedchild(cls[cl_idx])) {
+			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+										"child dataset with inherited mountpoint is used "
+										"in a non-global zone"));
+			ret = zfs_error(hdl, EZFS_ZONED, errbuf);
+			goto error;
+		}
+
+		if (cls[cl_idx] != NULL &&
+			(ret = changelist_prefix(cls[cl_idx])) != 0)
+			goto error;
+
+		cl_idx++;
+	}
+	assert(cl_idx == nvl_len);
+
+	/*
+	 * Execute the corresponding ioctl() to set this list of properties.
+	 */
+	(void) strlcpy(zc.zc_name, zhp->zfs_name, sizeof (zc.zc_name));
+
+        if ((ret = zcmd_write_src_nvlist(hdl, &zc, nvl)) != 0 ||
+            (ret = zcmd_alloc_dst_nvlist(hdl, &zc, 0)) != 0)
+                goto error;
+
+        ret = zfs_ioctl(hdl, ZFS_IOC_SET_PROP, &zc);
+
+        if (ret != 0) {
+			/* Get the list of unset properties back and report them. */
+			nvlist_t *errorprops = NULL;
+			if (zcmd_read_dst_nvlist(hdl, &zc, &errorprops) != 0)
+				goto error;
+			for (nvpair_t *elem = nvlist_next_nvpair(nvl, NULL);
+				 elem != NULL;
+				 elem = nvlist_next_nvpair(nvl, elem)) {
+				zfs_prop_t prop = zfs_name_to_prop(nvpair_name(elem));
+				zfs_setprop_error(hdl, prop, errno, errbuf);
+			}
+			nvlist_free(errorprops);
+
+			if (added_resv && errno == ENOSPC) {
+				/* clean up the volsize property we tried to set */
+				uint64_t old_volsize = zfs_prop_get_int(zhp,
+														ZFS_PROP_VOLSIZE);
+				nvlist_free(nvl);
+				nvl = NULL;
+				zcmd_free_nvlists(&zc);
+
+				if (nvlist_alloc(&nvl, NV_UNIQUE_NAME, 0) != 0)
+					goto error_nofree;
+				if (nvlist_add_uint64(nvl,
+									  zfs_prop_to_name(ZFS_PROP_VOLSIZE),
+									  old_volsize) != 0)
+					goto error_nofree;
+				if (zcmd_write_src_nvlist(hdl, &zc, nvl) != 0)
+					goto error_nofree;
+				(void) zfs_ioctl(hdl, ZFS_IOC_SET_PROP, &zc);
+				goto error_nofree;
+			}
+        } else {
+			for (cl_idx = 0; cl_idx < nvl_len; cl_idx++) {
+				if (cls[cl_idx] != NULL) {
+					int clp_err = changelist_postfix(cls[cl_idx]);
+					if (clp_err != 0)
+						ret = clp_err;
+				}
+			}
+
+			/*
+			 * Refresh the statistics so the new property value
+			 * is reflected.
+			 */
+			if (ret == 0)
+				(void) get_stats(zhp);
+        }
+
+  error:
+        zcmd_free_nvlists(&zc);
+  error_nofree:
+        nvlist_free(nvl);
+        if (cls != NULL) {
+			for (cl_idx = 0; cl_idx < nvl_len; cl_idx++) {
+				if (cls[cl_idx] != NULL)
+					changelist_free(cls[cl_idx]);
+			}
+			free(cls);
+        }
+        return (ret);
+}
+
+
+
 #ifdef __LINUX__
 static boolean_t
 zfs_is_namespace_prop(zfs_prop_t prop)
@@ -1644,132 +1863,6 @@ zfs_is_namespace_prop(zfs_prop_t prop)
 }
 #endif /* __LINUX__ */
 
-/*
- * Given a property name and value, set the property for the given dataset.
- */
-int
-zfs_prop_set(zfs_handle_t *zhp, const char *propname, const char *propval)
-{
-	zfs_cmd_t zc = {"\0"};
-	int ret = -1;
-	prop_changelist_t *cl = NULL;
-	char errbuf[1024];
-	libzfs_handle_t *hdl = zhp->zfs_hdl;
-	nvlist_t *nvl = NULL, *realprops;
-	zfs_prop_t prop;
-	boolean_t do_prefix = B_TRUE;
-	int added_resv = 0;
-
-	(void) snprintf(errbuf, sizeof (errbuf),
-	    dgettext(TEXT_DOMAIN, "cannot set property for '%s'"),
-	    zhp->zfs_name);
-
-	if (nvlist_alloc(&nvl, NV_UNIQUE_NAME, 0) != 0 ||
-	    nvlist_add_string(nvl, propname, propval) != 0) {
-		(void) no_memory(hdl);
-		goto error;
-	}
-
-	if ((realprops = zfs_valid_proplist(hdl, zhp->zfs_type, nvl,
-	    zfs_prop_get_int(zhp, ZFS_PROP_ZONED), zhp, errbuf)) == NULL)
-		goto error;
-
-	nvlist_free(nvl);
-	nvl = realprops;
-
-	prop = zfs_name_to_prop(propname);
-
-	if (prop == ZFS_PROP_VOLSIZE) {
-		if ((added_resv = zfs_add_synthetic_resv(zhp, nvl)) == -1)
-			goto error;
-	}
-
-	if ((cl = changelist_gather(zhp, prop, 0, 0)) == NULL)
-		goto error;
-
-	if (prop == ZFS_PROP_MOUNTPOINT && changelist_haszonedchild(cl)) {
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-		    "child dataset with inherited mountpoint is used "
-		    "in a non-global zone"));
-		ret = zfs_error(hdl, EZFS_ZONED, errbuf);
-		goto error;
-	}
-
-	/*
-	 * We don't want to unmount & remount the dataset when changing
-	 * its canmount property to 'on' or 'noauto'.  We only use
-	 * the changelist logic to unmount when setting canmount=off.
-	 */
-	if (prop == ZFS_PROP_CANMOUNT) {
-		uint64_t idx;
-		int err = zprop_string_to_index(prop, propval, &idx,
-		    ZFS_TYPE_DATASET);
-		if (err == 0 && idx != ZFS_CANMOUNT_OFF)
-			do_prefix = B_FALSE;
-	}
-
-	if (do_prefix && (ret = changelist_prefix(cl)) != 0)
-		goto error;
-
-	/*
-	 * Execute the corresponding ioctl() to set this property.
-	 */
-	(void) strlcpy(zc.zc_name, zhp->zfs_name, sizeof (zc.zc_name));
-
-	if (zcmd_write_src_nvlist(hdl, &zc, nvl) != 0)
-		goto error;
-
-	ret = zfs_ioctl(hdl, ZFS_IOC_SET_PROP, &zc);
-
-	if (ret != 0) {
-		zfs_setprop_error(hdl, prop, errno, errbuf);
-		if (added_resv && errno == ENOSPC) {
-			/* clean up the volsize property we tried to set */
-			uint64_t old_volsize = zfs_prop_get_int(zhp,
-			    ZFS_PROP_VOLSIZE);
-			nvlist_free(nvl);
-			zcmd_free_nvlists(&zc);
-			if (nvlist_alloc(&nvl, NV_UNIQUE_NAME, 0) != 0)
-				goto error;
-			if (nvlist_add_uint64(nvl,
-			    zfs_prop_to_name(ZFS_PROP_VOLSIZE),
-			    old_volsize) != 0)
-				goto error;
-			if (zcmd_write_src_nvlist(hdl, &zc, nvl) != 0)
-				goto error;
-			(void) zfs_ioctl(hdl, ZFS_IOC_SET_PROP, &zc);
-		}
-	} else {
-		if (do_prefix)
-			ret = changelist_postfix(cl);
-
-		if (ret == 0) {
-			/*
-			 * Refresh the statistics so the new property
-			 * value is reflected.
-			 */
-			(void) get_stats(zhp);
-
-			/*
-			 * Remount the filesystem to propagate the change
-			 * if one of the options handled by the generic
-			 * Linux namespace layer has been modified.
-			 */
-#ifdef __LINUX__
-			if (zfs_is_namespace_prop(prop) &&
-			    zfs_is_mounted(zhp, NULL))
-				ret = zfs_mount(zhp, MNTOPT_REMOUNT, 0);
-#endif
-		}
-	}
-
-error:
-	nvlist_free(nvl);
-	zcmd_free_nvlists(&zc);
-	if (cl)
-		changelist_free(cl);
-	return (ret);
-}
 
 /*
  * Given a property, inherit the value from the parent dataset, or if received
@@ -1830,7 +1923,7 @@ zfs_prop_inherit(zfs_handle_t *zhp, const char *propname, boolean_t received)
 	/*
 	 * Check to see if the value applies to this type
 	 */
-	if (!zfs_prop_valid_for_type(prop, zhp->zfs_type, B_FALSE))
+	if (!zfs_prop_valid_for_type(prop, zhp->zfs_type))
 		return (zfs_error(hdl, EZFS_PROPTYPE, errbuf));
 
 	/*
@@ -1918,22 +2011,21 @@ getprop_uint64(zfs_handle_t *zhp, zfs_prop_t prop, char **source)
 	return (value);
 }
 
-static char *
+static const char *
 getprop_string(zfs_handle_t *zhp, zfs_prop_t prop, char **source)
 {
 	nvlist_t *nv;
-	char *value;
+	const char *value;
 
 	*source = NULL;
 	if (nvlist_lookup_nvlist(zhp->zfs_props,
 	    zfs_prop_to_name(prop), &nv) == 0) {
-		verify(nvlist_lookup_string(nv, ZPROP_VALUE, &value) == 0);
+		value = fnvlist_lookup_string(nv, ZPROP_VALUE);
 		(void) nvlist_lookup_string(nv, ZPROP_SOURCE, source);
 	} else {
 		verify(!zhp->zfs_props_table ||
 		    zhp->zfs_props_table[prop] == B_TRUE);
-		if ((value = (char *)zfs_prop_default_string(prop)) == NULL)
-			value = "";
+		value = zfs_prop_default_string(prop);
 		*source = "";
 	}
 
@@ -1987,7 +2079,7 @@ get_numeric_property(zfs_handle_t *zhp, zfs_prop_t prop, zprop_source_t *src,
 	 * the property is valid for the snapshot's head dataset type.
 	 */
 	if (zhp->zfs_type == ZFS_TYPE_SNAPSHOT &&
-		!zfs_prop_valid_for_type(prop, zhp->zfs_head_type, B_TRUE)) {
+		!zfs_prop_valid_for_type(prop, zhp->zfs_head_type)) {
 			*val = zfs_prop_default_numeric(prop);
 			return (-1);
 	}
@@ -2077,6 +2169,10 @@ get_numeric_property(zfs_handle_t *zhp, zfs_prop_t prop, zprop_source_t *src,
 		mnt.mnt_mntopts = zhp->zfs_mntopts;
 
 	switch (prop) {
+	case ZFS_PROP_ATIME:
+#ifdef LINUX
+	case ZFS_PROP_RELATIME:
+#endif
 	case ZFS_PROP_DEVICES:
 	case ZFS_PROP_EXEC:
 	case ZFS_PROP_READONLY:
@@ -2084,8 +2180,8 @@ get_numeric_property(zfs_handle_t *zhp, zfs_prop_t prop, zprop_source_t *src,
 	case ZFS_PROP_XATTR:
 	case ZFS_PROP_NBMAND:
 #ifdef __APPLE__
-        case ZFS_PROP_APPLE_BROWSE:
-        case ZFS_PROP_APPLE_IGNOREOWNER:
+	case ZFS_PROP_APPLE_BROWSE:
+	case ZFS_PROP_APPLE_IGNOREOWNER:
 #endif
 		*val = getprop_uint64(zhp, prop, source);
 
@@ -2103,16 +2199,16 @@ get_numeric_property(zfs_handle_t *zhp, zfs_prop_t prop, zprop_source_t *src,
 		}
 		break;
 
-	case ZFS_PROP_ATIME:
-#ifdef LINUX
-	case ZFS_PROP_RELATIME:
-#endif
 	case ZFS_PROP_CANMOUNT:
 	case ZFS_PROP_VOLSIZE:
 	case ZFS_PROP_QUOTA:
 	case ZFS_PROP_REFQUOTA:
 	case ZFS_PROP_RESERVATION:
 	case ZFS_PROP_REFRESERVATION:
+	case ZFS_PROP_FILESYSTEM_LIMIT:
+	case ZFS_PROP_SNAPSHOT_LIMIT:
+	case ZFS_PROP_FILESYSTEM_COUNT:
+	case ZFS_PROP_SNAPSHOT_COUNT:
 		*val = getprop_uint64(zhp, prop, source);
 
 		if (*source == NULL) {
@@ -2138,6 +2234,9 @@ get_numeric_property(zfs_handle_t *zhp, zfs_prop_t prop, zprop_source_t *src,
 		(void) strlcpy(zc.zc_name, zhp->zfs_name, sizeof (zc.zc_name));
 		if (zfs_ioctl(zhp->zfs_hdl, ZFS_IOC_OBJSET_ZPLPROPS, &zc)) {
 			zcmd_free_nvlists(&zc);
+			if (prop == ZFS_PROP_VERSION &&
+			    zhp->zfs_type == ZFS_TYPE_VOLUME)
+				*val = zfs_prop_default_numeric(prop);
 			return (-1);
 		}
 		if (zcmd_read_dst_nvlist(zhp->zfs_hdl, &zc, &zplprops) != 0 ||
@@ -2369,14 +2468,14 @@ zfs_prop_get(zfs_handle_t *zhp, zfs_prop_t prop, char *propbuf, size_t proplen,
 {
 	char *source = NULL;
 	uint64_t val;
-	char *str;
+	const char *str;
 	const char *strval;
 	boolean_t received = zfs_is_recvd_props_mode(zhp);
 
 	/*
 	 * Check to see if this property applies to our object
 	 */
-	if (!zfs_prop_valid_for_type(prop, zhp->zfs_type, B_FALSE))
+	if (!zfs_prop_valid_for_type(prop, zhp->zfs_type))
 		return (-1);
 
 	if (received && zfs_prop_readonly(prop))
@@ -2482,6 +2581,17 @@ zfs_prop_get(zfs_handle_t *zhp, zfs_prop_t prop, char *propbuf, size_t proplen,
 				str++;
 
 #ifdef __APPLE__
+			/*
+			 * On OSX by default we mount pools under /Volumes unless
+			 * the dataset property mountpoint specifies otherwise.
+			 * In addition to this, there is an undocumented environment
+			 * variable __ZFS_MAIN_MOUNTPOINT_DIR, used mainly by the
+			 * testing environment, as it expects "/" by default.
+			 */
+			char *default_mountpoint;
+			default_mountpoint = getenv("__ZFS_MAIN_MOUNTPOINT_DIR");
+			if (!default_mountpoint) default_mountpoint = "/Volumes/";
+
 			//Temporarily allowing snapshot mounting
 			if (zhp->zfs_type == ZFS_TYPE_SNAPSHOT) {
 				const char *r = strrchr(relpath, '@');
@@ -2507,14 +2617,14 @@ zfs_prop_get(zfs_handle_t *zhp, zfs_prop_t prop, char *propbuf, size_t proplen,
 					(void) snprintf(propbuf, proplen,
 					    "%s%s%s%s/.zfs/snapshot/%s", root,
 					    str, source == NULL ||
-					    source[0] == '\0' ? "/Volumes/" :
+					    source[0] == '\0' ? default_mountpoint :
 					    "/", parent_name, snapshot_name);
 					free(parent_name);
 				} else {
 					(void) snprintf(propbuf, proplen,
 					    "%s%s%s.zfs/snapshot/%s", root, str,
 					    source == NULL ||
-					    source[0] == '\0' ? "/Volumes/" :
+					    source[0] == '\0' ? default_mountpoint :
 					    "/", snapshot_name);
 				}
 			} else {
@@ -2526,7 +2636,7 @@ zfs_prop_get(zfs_handle_t *zhp, zfs_prop_t prop, char *propbuf, size_t proplen,
 				(void) snprintf(propbuf, proplen, "%s%s%s%s",
 #ifdef __APPLE__
 				    root, str, source == NULL ||
-				    source[0] == '\0' ? "/Volumes/" : "/",
+				    source[0] == '\0' ? default_mountpoint : "/",
 #else
 				    root, str, relpath[0] == '@' ? "" : "/",
 #endif
@@ -2544,14 +2654,10 @@ zfs_prop_get(zfs_handle_t *zhp, zfs_prop_t prop, char *propbuf, size_t proplen,
 		break;
 
 	case ZFS_PROP_ORIGIN:
-		(void) strlcpy(propbuf, getprop_string(zhp, prop, &source),
-		    proplen);
-		/*
-		 * If there is no parent at all, return failure to indicate that
-		 * it doesn't apply to this dataset.
-		 */
-		if (propbuf[0] == '\0')
+		str = getprop_string(zhp, prop, &source);
+		if (str == NULL)
 			return (-1);
+		(void) strlcpy(propbuf, str, proplen);
 		break;
 
 	case ZFS_PROP_CLONES:
@@ -2584,6 +2690,30 @@ zfs_prop_get(zfs_handle_t *zhp, zfs_prop_t prop, char *propbuf, size_t proplen,
 				    (u_longlong_t)val);
 			else
 				zfs_nicenum(val, propbuf, proplen);
+		}
+		break;
+
+	case ZFS_PROP_FILESYSTEM_LIMIT:
+	case ZFS_PROP_SNAPSHOT_LIMIT:
+	case ZFS_PROP_FILESYSTEM_COUNT:
+	case ZFS_PROP_SNAPSHOT_COUNT:
+
+		if (get_numeric_property(zhp, prop, src, &source, &val) != 0)
+			return (-1);
+
+		/*
+		 * If limit is UINT64_MAX, we translate this into 'none' (unless
+		 * literal is set), and indicate that it's the default value.
+		 * Otherwise, we print the number nicely and indicate that it's
+		 * set locally.
+		 */
+		if (literal) {
+			(void) snprintf(propbuf, proplen, "%llu",
+			    (u_longlong_t)val);
+		} else if (val == UINT64_MAX) {
+			(void) strlcpy(propbuf, "none", proplen);
+		} else {
+			zfs_nicenum(val, propbuf, proplen);
 		}
 		break;
 
@@ -2709,8 +2839,10 @@ zfs_prop_get(zfs_handle_t *zhp, zfs_prop_t prop, char *propbuf, size_t proplen,
 			break;
 
 		case PROP_TYPE_STRING:
-			(void) strlcpy(propbuf,
-			    getprop_string(zhp, prop, &source), proplen);
+			str = getprop_string(zhp, prop, &source);
+			if (str == NULL)
+				return (-1);
+			(void) strlcpy(propbuf, str, proplen);
 			break;
 
 		case PROP_TYPE_INDEX:
@@ -2769,7 +2901,7 @@ zfs_prop_get_numeric(zfs_handle_t *zhp, zfs_prop_t prop, uint64_t *value,
 	/*
 	 * Check to see if this property applies to our object
 	 */
-	if (!zfs_prop_valid_for_type(prop, zhp->zfs_type, B_FALSE)) {
+	if (!zfs_prop_valid_for_type(prop, zhp->zfs_type)) {
 		return (zfs_error_fmt(zhp->zfs_hdl, EZFS_PROPTYPE,
 		    dgettext(TEXT_DOMAIN, "cannot get property '%s'"),
 		    zfs_prop_to_name(prop)));
@@ -3375,9 +3507,22 @@ zfs_create(libzfs_handle_t *hdl, const char *path, zfs_type_t type,
 	else
 		ost = DMU_OST_ZFS;
 
+	/* open zpool handle for prop validation */
+	char pool_path[MAXNAMELEN];
+	(void) strlcpy(pool_path, path, sizeof (pool_path));
+
+	/* truncate pool_path at first slash */
+	char *p = strchr(pool_path, '/');
+	if (p != NULL)
+		*p = '\0';
+
+	zpool_handle_t *zpool_handle = zpool_open(hdl, pool_path);
+
 	if (props && (props = zfs_valid_proplist(hdl, type, props,
-	    zoned, NULL, errbuf)) == 0)
+		zoned, NULL, zpool_handle, errbuf)) == 0) {
 		return (-1);
+	}
+	zpool_close(zpool_handle);
 
 	if (type == ZFS_TYPE_VOLUME) {
 		/*
@@ -3437,6 +3582,8 @@ zfs_create(libzfs_handle_t *hdl, const char *path, zfs_type_t type,
 	/* check for failure */
 	if (ret != 0) {
 		char parent[ZFS_MAXNAMELEN];
+		char buf[64];
+
 		(void) parent_name(path, parent, sizeof (parent));
 
 		switch (errno) {
@@ -3451,11 +3598,10 @@ zfs_create(libzfs_handle_t *hdl, const char *path, zfs_type_t type,
 			return (zfs_error(hdl, EZFS_BADTYPE, errbuf));
 
 		case EDOM:
+			zfs_nicenum(SPA_MAXBLOCKSIZE, buf, sizeof (buf));
 			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 			    "volume block size must be power of 2 from "
-			    "%u to %uk"),
-			    (uint_t)SPA_MINBLOCKSIZE,
-			    (uint_t)SPA_MAXBLOCKSIZE >> 10);
+			    "512B to %s"), buf);
 
 			return (zfs_error(hdl, EZFS_BADPROP, errbuf));
 
@@ -3661,7 +3807,7 @@ zfs_clone(zfs_handle_t *zhp, const char *target, nvlist_t *props)
 			type = ZFS_TYPE_FILESYSTEM;
 		}
 		if ((props = zfs_valid_proplist(hdl, type, props, zoned,
-		    zhp, errbuf)) == NULL)
+			zhp, zhp->zpool_hdl, errbuf)) == NULL)
 			return (-1);
 	}
 
@@ -3812,11 +3958,23 @@ zfs_snapshot_nvl(libzfs_handle_t *hdl, nvlist_t *snaps, nvlist_t *props)
 		}
 	}
 
+	/*
+	 * get pool handle for prop validation. assumes all snaps are in the
+	 * same pool, as does lzc_snapshot (below).
+	 */
+	char pool[MAXNAMELEN];
+	elem = nvlist_next_nvpair(snaps, NULL);
+	(void) strlcpy(pool, nvpair_name(elem), sizeof (pool));
+	pool[strcspn(pool, "/@")] = '\0';
+	zpool_handle_t *zpool_hdl = zpool_open(hdl, pool);
+
 	if (props != NULL &&
 	    (props = zfs_valid_proplist(hdl, ZFS_TYPE_SNAPSHOT,
-	    props, B_FALSE, NULL, errbuf)) == NULL) {
+		props, B_FALSE, NULL, zpool_hdl, errbuf)) == NULL) {
+		zpool_close(zpool_hdl);
 		return (-1);
 	}
+	zpool_close(zpool_hdl);
 
 	ret = lzc_snapshot(snaps, props, &errors);
 

@@ -53,9 +53,6 @@ extern "C" {
 
 extern SInt32 zfs_active_fs_count;
 
-/* Global system task queue for common use */
-extern int system_taskq_size;
-taskq_t	*system_taskq = NULL;
 
 #ifdef DEBUG
 #define	ZFS_DEBUG_STR	" (DEBUG mode)"
@@ -121,7 +118,7 @@ zfs_vfs_sysctl(int *name, __unused u_int namelen, user_addr_t oldp, size_t *oldl
 		copyoutsize = sizeof (zfs_footprint_stats_t) +
 		              ((act_caches - 1) * sizeof (kmem_cache_stats_t));
 
-		error = copyout(footprint, oldp, copyoutsize);
+		error = ddi_copyout(footprint, oldp, copyoutsize, 0);
 
 		kmem_free(footprint, copyinsize);
 
@@ -146,68 +143,8 @@ zfs_vfs_sysctl(int *name, __unused u_int namelen, user_addr_t oldp, size_t *oldl
 #endif /* __APPLE__ */
 
 
-
-void
-system_taskq_fini(void)
-{
-    if (system_taskq)
-        taskq_destroy(system_taskq);
-}
-
-
 #include <sys/utsname.h>
 #include <string.h>
-
-void
-system_taskq_init(void)
-{
-
-    system_taskq = taskq_create("system_taskq",
-                                system_taskq_size * max_ncpus,
-                                minclsyspri, 4, 512,
-                                TASKQ_DYNAMIC | TASKQ_PREPOPULATE);
-
-
-}
-
-/*
- * fnv_32a_str - perform a 32 bit Fowler/Noll/Vo FNV-1a hash on a string
- *
- * input:
- *	str	- string to hash
- *	hval	- previous hash value or 0 if first call
- *
- * returns:
- *	32 bit hash as a static hash type
- *
- * NOTE: To use the recommended 32 bit FNV-1a hash, use FNV1_32A_INIT as the
- *  	 hval arg on the first call to either fnv_32a_buf() or fnv_32a_str().
- */
-#define FNV1_32A_INIT ((uint32_t)0x811c9dc5)
-uint32_t
-fnv_32a_str(const char *str, uint32_t hval)
-{
-    unsigned char *s = (unsigned char *)str;	/* unsigned string */
-
-    /*
-     * FNV-1a hash each octet in the buffer
-     */
-    while (*s) {
-
-	/* xor the bottom with the current octet */
-	hval ^= (uint32_t)*s++;
-
-	/* multiply by the 32 bit FNV magic prime mod 2^32 */
-#if defined(NO_FNV_GCC_OPTIMIZATION)
-	hval *= FNV_32_PRIME;
-#else
-	hval += (hval<<1) + (hval<<4) + (hval<<7) + (hval<<8) + (hval<<24);
-#endif
-    }
-
-    /* return our new hash value */
-    return hval;
-}
 
 
 } // Extern "C"
@@ -495,41 +432,39 @@ uint64_t zvolIO_kit_write(void *iomem, uint64_t offset, char *address, uint64_t 
 
 #include <sys/vdev_impl.h>
 #include <sys/spa_impl.h>
+#include <sys/vdev_disk.h>
 
 static vdev_t *
 vdev_lookup_by_path(vdev_t *vd, const char *name)
 {
 	vdev_t *mvd;
 	int c;
-	char pathbuf[MAXPATHLEN];
 	char *lookup_name;
-	int err = 0;
+	vdev_disk_t *dvd = NULL;
+
+	if (!vd) return NULL;
+
+	dvd = (vdev_disk_t *)vd->vdev_tsd;
 
 	// Check both strings are valid
-	if (name && *name &&
+	if (name && *name && dvd &&
 		vd->vdev_path && vd->vdev_path[0]) {
 		int off;
-		struct vnode *vp;
+
+		// Try normal path "vdev_path" or the readlink resolved
 
 		lookup_name = vd->vdev_path;
 
-		// We need to resolve symlinks here to get the final source name
-		dprintf("ZFS: Looking up '%s'\n", vd->vdev_path);
+		// Skip /dev/ or not?
+		strncmp("/dev/", lookup_name, 5) == 0 ? off=5 : off=0;
 
-		if ((err = vnode_lookup(vd->vdev_path, 0,
-								&vp, vfs_context_current())) == 0) {
-			int len = MAXPATHLEN;
+		dprintf("ZFS: vdev '%s' == '%s' ?\n", name,
+				&lookup_name[off]);
 
-			if ((err = vn_getpath(vp, pathbuf, &len)) == 0) {
-				dprintf("ZFS: '%s' resolved name is '%s'\n",
-						vd->vdev_path, pathbuf);
-				lookup_name = pathbuf;
-			}
+		if (!strcmp(name, &lookup_name[off])) return vd;
 
-			vnode_put(vp);
-		}
 
-		if (err) dprintf("ZFS: Lookup failed %d\n", err);
+		lookup_name = dvd->vd_readlinkname;
 
 		// Skip /dev/ or not?
 		strncmp("/dev/", lookup_name, 5) == 0 ? off=5 : off=0;
@@ -548,25 +483,6 @@ vdev_lookup_by_path(vdev_t *vd, const char *name)
 	return (NULL);
 }
 
-#include <sys/vdev_disk.h>
-
-extern "C" {
-
-  /*
-   * Unfortunately the notify thread that posts the termination event to us
-   * is inside IOkit locked loop, so we have to issue the vnode_close()
-   * async, or vn_close()/dkclose() will wait on notify to release the lock
-   */
-  static void vdev_close_thread(void *arg)
-  {
-	vdev_t *vd = (vdev_t *)arg;
-	vdev_disk_t *dvd = (vdev_disk_t *)vd->vdev_tsd;
-
-	dvd->vd_offline = B_TRUE;
-	vdev_disk_close(vd);
-	thread_exit();
-  }
-}
 
 /*
  * Callback for device termination events, ie, disks removed.
@@ -598,17 +514,18 @@ bool IOkit_disk_removed_callback(void* target,
 								   bsdnameosstr->getCStringNoCopy());
 
 		  if (vd && vd->vdev_path) {
+			  vdev_disk_t *dvd = (vdev_disk_t *)vd->vdev_tsd;
 
-			printf("ZFS: Device '%s' removal requested\n",
-				   vd->vdev_path);
-			(void) thread_create(NULL, 0, vdev_close_thread,
-								 vd, 0, &p0,
-								 TS_RUN, minclsyspri);
+			  printf("ZFS: Device '%s' removal requested\n",
+					 vd->vdev_path);
 
-			vd->vdev_remove_wanted = B_TRUE;
-			spa_async_request(spa, SPA_ASYNC_REMOVE);
+			  if (dvd) dvd->vd_offline = B_TRUE;
+			  vdev_disk_close(vd);
 
-			break;
+			  vd->vdev_remove_wanted = B_TRUE;
+			  spa_async_request(spa, SPA_ASYNC_REMOVE);
+
+			  break;
 		  }
 
 		} // for all spa

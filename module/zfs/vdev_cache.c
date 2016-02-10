@@ -102,7 +102,7 @@ static vdc_stats_t vdc_stats = {
 	{ "misses",		KSTAT_DATA_UINT64 }
 };
 
-#define	VDCSTAT_BUMP(stat)	atomic_add_64(&vdc_stats.stat.value.ui64, 1);
+#define	VDCSTAT_BUMP(stat)	atomic_inc_64(&vdc_stats.stat.value.ui64);
 
 static int
 vdev_cache_offset_compare(const void *a1, const void *a2)
@@ -180,7 +180,7 @@ vdev_cache_allocate(zio_t *zio)
 		vdev_cache_evict(vc, ve);
 	}
 
-	ve = kmem_zalloc(sizeof (vdev_cache_entry_t), KM_PUSHPAGE);
+	ve = kmem_zalloc(sizeof (vdev_cache_entry_t), KM_SLEEP);
 	ve->ve_offset = offset;
 	ve->ve_lastused = ddi_get_lbolt();
 	ve->ve_data = zio_buf_alloc(VCBS);
@@ -277,7 +277,7 @@ vdev_cache_read(zio_t *zio)
 
 	mutex_enter(&vc->vc_lock);
 
-	ve_search = kmem_alloc(sizeof (vdev_cache_entry_t), KM_PUSHPAGE);
+	ve_search = kmem_alloc(sizeof (vdev_cache_entry_t), KM_SLEEP);
 	ve_search->ve_offset = cache_offset;
 	ve = avl_find(&vc->vc_offset_tree, ve_search, NULL);
 	kmem_free(ve_search, sizeof (vdev_cache_entry_t));

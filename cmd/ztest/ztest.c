@@ -20,7 +20,7 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
+ * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
  * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
  * Copyright (c) 2013 Steven Hartland. All rights reserved.
  */
@@ -127,7 +127,6 @@
 #include <unistd.h>
 #include <signal.h>
 #include <umem.h>
-#include <dlfcn.h>
 #include <ctype.h>
 #include <math.h>
 #include <sys/fs/zfs.h>
@@ -320,6 +319,7 @@ typedef struct ztest_info {
 	ztest_func_t	*zi_func;	/* test function */
 	uint64_t	zi_iters;	/* iterations per execution */
 	uint64_t	*zi_interval;	/* execute every <interval> seconds */
+	const char	*zi_funcname;	/* name of test function */
 } ztest_info_t;
 
 typedef struct ztest_shared_callstate {
@@ -331,9 +331,6 @@ typedef struct ztest_shared_callstate {
 static ztest_shared_callstate_t *ztest_shared_callstate;
 #define	ZTEST_GET_SHARED_CALLSTATE(c) (&ztest_shared_callstate[c])
 
-/*
- * Note: these aren't static because we want dladdr() to work.
- */
 ztest_func_t ztest_dmu_read_write;
 ztest_func_t ztest_dmu_write_parallel;
 ztest_func_t ztest_dmu_object_alloc_free;
@@ -371,41 +368,45 @@ uint64_t zopt_often = 1ULL * NANOSEC;		/* every second */
 uint64_t zopt_sometimes = 10ULL * NANOSEC;	/* every 10 seconds */
 uint64_t zopt_rarely = 60ULL * NANOSEC;		/* every 60 seconds */
 
+#define	ZTI_INIT(func, iters, interval) \
+	{   .zi_func = (func), \
+	    .zi_iters = (iters), \
+	    .zi_interval = (interval), \
+	    .zi_funcname = # func }
+
 ztest_info_t ztest_info[] = {
-	{ ztest_dmu_read_write,			1,	&zopt_always	},
-	{ ztest_dmu_write_parallel,		10,	&zopt_always	},
-	{ ztest_dmu_object_alloc_free,		1,	&zopt_always	},
-	{ ztest_dmu_commit_callbacks,		1,	&zopt_always	},
-	{ ztest_zap,				30,	&zopt_always	},
-	{ ztest_zap_parallel,			100,	&zopt_always	},
-	{ ztest_split_pool,			1,	&zopt_always	},
-	{ ztest_zil_commit,			1,	&zopt_incessant	},
-	{ ztest_zil_remount,			1,	&zopt_sometimes	},
-	{ ztest_dmu_read_write_zcopy,		1,	&zopt_often	},
-	{ ztest_dmu_objset_create_destroy,	1,	&zopt_often	},
-	{ ztest_dsl_prop_get_set,		1,	&zopt_often	},
-	{ ztest_spa_prop_get_set,		1,	&zopt_sometimes	},
+	ZTI_INIT(ztest_dmu_read_write, 1, &zopt_always),
+	ZTI_INIT(ztest_dmu_write_parallel, 10, &zopt_always),
+	ZTI_INIT(ztest_dmu_object_alloc_free, 1, &zopt_always),
+	ZTI_INIT(ztest_dmu_commit_callbacks, 1, &zopt_always),
+	ZTI_INIT(ztest_zap, 30, &zopt_always),
+	ZTI_INIT(ztest_zap_parallel, 100, &zopt_always),
+	ZTI_INIT(ztest_split_pool, 1, &zopt_always),
+	ZTI_INIT(ztest_zil_commit, 1, &zopt_incessant),
+	ZTI_INIT(ztest_zil_remount, 1, &zopt_sometimes),
+	ZTI_INIT(ztest_dmu_read_write_zcopy, 1, &zopt_often),
+	ZTI_INIT(ztest_dmu_objset_create_destroy, 1, &zopt_often),
+	ZTI_INIT(ztest_dsl_prop_get_set, 1, &zopt_often),
+	ZTI_INIT(ztest_spa_prop_get_set, 1, &zopt_sometimes),
 #if 0
-	{ ztest_dmu_prealloc,			1,	&zopt_sometimes	},
+	ZTI_INIT(ztest_dmu_prealloc, 1, &zopt_sometimes),
 #endif
-	{ ztest_fzap,				1,	&zopt_sometimes	},
-	{ ztest_dmu_snapshot_create_destroy,	1,	&zopt_sometimes	},
-	{ ztest_spa_create_destroy,		1,	&zopt_sometimes	},
-	{ ztest_fault_inject,			1,	&zopt_sometimes	},
-	{ ztest_ddt_repair,			1,	&zopt_sometimes	},
-	{ ztest_dmu_snapshot_hold,		1,	&zopt_sometimes	},
-	{ ztest_reguid,				1,	&zopt_rarely	},
-	{ ztest_spa_rename,			1,	&zopt_rarely	},
-	{ ztest_scrub,				1,	&zopt_rarely	},
-	{ ztest_spa_upgrade,			1,	&zopt_rarely	},
-	{ ztest_dsl_dataset_promote_busy,	1,	&zopt_rarely	},
-	{ ztest_vdev_attach_detach,		1,	&zopt_sometimes	},
-	{ ztest_vdev_LUN_growth,		1,	&zopt_rarely	},
-	{ ztest_vdev_add_remove,		1,
-	    &ztest_opts.zo_vdevtime				},
-	{ ztest_vdev_aux_add_remove,		1,
-	    &ztest_opts.zo_vdevtime				},
-    { ztest_dsl_crypto,                     1,      &zopt_often     },
+	ZTI_INIT(ztest_fzap, 1, &zopt_sometimes),
+	ZTI_INIT(ztest_dmu_snapshot_create_destroy, 1, &zopt_sometimes),
+	ZTI_INIT(ztest_spa_create_destroy, 1, &zopt_sometimes),
+	ZTI_INIT(ztest_fault_inject, 1, &zopt_sometimes),
+	ZTI_INIT(ztest_ddt_repair, 1, &zopt_sometimes),
+	ZTI_INIT(ztest_dmu_snapshot_hold, 1, &zopt_sometimes),
+	ZTI_INIT(ztest_reguid, 1, &zopt_rarely),
+	ZTI_INIT(ztest_spa_rename, 1, &zopt_rarely),
+	ZTI_INIT(ztest_scrub, 1, &zopt_rarely),
+	ZTI_INIT(ztest_spa_upgrade, 1, &zopt_rarely),
+	ZTI_INIT(ztest_dsl_dataset_promote_busy, 1, &zopt_rarely),
+	ZTI_INIT(ztest_vdev_attach_detach, 1, &zopt_sometimes),
+	ZTI_INIT(ztest_vdev_LUN_growth, 1, &zopt_rarely),
+	ZTI_INIT(ztest_vdev_add_remove, 1, &ztest_opts.zo_vdevtime),
+	ZTI_INIT(ztest_vdev_aux_add_remove, 1, &ztest_opts.zo_vdevtime),
+	ZTI_INIT(ztest_dsl_crypto, 1, &zopt_often),
 };
 
 #define	ZTEST_FUNCS	(sizeof (ztest_info) / sizeof (ztest_info_t))
@@ -900,9 +901,6 @@ ztest_kill(ztest_shared_t *zs)
 	spa_config_sync(ztest_spa, B_FALSE, B_FALSE);
 	mutex_exit(&spa_namespace_lock);
 
-	if (ztest_opts.zo_verbose >= 3)
-		zfs_dbgmsg_print(FTAG);
-
 	(void) kill(getpid(), SIGKILL);
 }
 
@@ -1123,27 +1121,18 @@ ztest_random_spa_version(uint64_t initial_version)
 	return (version);
 }
 
-/*
- * Find the largest ashift used
- */
-static uint64_t
-ztest_spa_get_ashift(void) {
-	uint64_t i;
-	uint64_t ashift = SPA_MINBLOCKSHIFT;
-	vdev_t *rvd = ztest_spa->spa_root_vdev;
-
-	for (i = 0; i < rvd->vdev_children; i++) {
-		ashift = MAX(ashift, rvd->vdev_child[i]->vdev_ashift);
-	}
-	return (ashift);
-}
-
 static int
 ztest_random_blocksize(void)
 {
-	// Choose a block size >= the ashift.
+	/*
+	 * Choose a block size >= the ashift.
+	 * If the SPA supports new MAXBLOCKSIZE, test up to 1MB blocks.
+	 */
+	int maxbs = SPA_OLD_MAXBLOCKSHIFT;
+	if (spa_maxblocksize(ztest_spa) == SPA_MAXBLOCKSIZE)
+		maxbs = 20;
 	uint64_t block_shift =
-	    ztest_random(SPA_MAXBLOCKSHIFT - ztest_spa_get_ashift() + 1);
+	    ztest_random(maxbs - ztest_spa->spa_max_ashift + 1);
 	return (1 << (SPA_MINBLOCKSHIFT + block_shift));
 }
 
@@ -1207,9 +1196,16 @@ ztest_dsl_prop_set_uint64(char *osname, zfs_prop_t prop, uint64_t value,
 	VERIFY0(dsl_prop_get_integer(osname, propname, &curval, setpoint));
 
 	if (ztest_opts.zo_verbose >= 6) {
-		VERIFY(zfs_prop_index_to_string(prop, curval, &valname) == 0);
-		(void) printf("%s %s = %s at '%s'\n",
-		    osname, propname, valname, setpoint);
+		int err;
+
+		err = zfs_prop_index_to_string(prop, curval, &valname);
+		if (err)
+			(void) printf("%s %s = %llu at '%s'\n",
+			    osname, propname, (unsigned long long)curval,
+				setpoint);
+		else
+			(void) printf("%s %s = %s at '%s'\n",
+			    osname, propname, valname, setpoint);
 	}
 	umem_free(setpoint, MAXPATHLEN);
 
@@ -1999,7 +1995,8 @@ ztest_get_done(zgd_t *zgd, int error)
 }
 
 static int
-ztest_get_data(void *arg, lr_write_t *lr, char *buf, zio_t *zio)
+ztest_get_data(void *arg, lr_write_t *lr, char *buf, zio_t *zio,
+			   struct znode *zp, struct rl *rl)
 {
 	ztest_ds_t *zd = arg;
 	objset_t *os = zd->zd_os;
@@ -3893,7 +3890,7 @@ ztest_dmu_read_write(ztest_ds_t *zd, uint64_t id)
 	 */
 	n = ztest_random(regions) * stride + ztest_random(width);
 	s = 1 + ztest_random(2 * width - 1);
-	dmu_prefetch(os, bigobj, n * chunksize, s * chunksize);
+	dmu_prefetch(os, bigobj, 0, n * chunksize, s * chunksize, ZIO_PRIORITY_SYNC_READ);
 
 	/*
 	 * Pick a random index and compute the offsets into packobj and bigobj.
@@ -4216,7 +4213,7 @@ ztest_dmu_read_write_zcopy(ztest_ds_t *zd, uint64_t id)
 		 * assign an arcbuf to a dbuf.
 		 */
 		for (j = 0; j < s; j++) {
-			if (i != 5) {
+			if (i != 5 || chunksize < (SPA_MINBLOCKSIZE * 2)) {
 				bigbuf_arcbufs[j] =
 				    dmu_request_arcbuf(bonus_db, chunksize);
 			} else {
@@ -4240,7 +4237,8 @@ ztest_dmu_read_write_zcopy(ztest_ds_t *zd, uint64_t id)
 			umem_free(packbuf, packsize);
 			umem_free(bigbuf, bigsize);
 			for (j = 0; j < s; j++) {
-				if (i != 5) {
+				if (i != 5 ||
+				    chunksize < (SPA_MINBLOCKSIZE * 2)) {
 					dmu_return_arcbuf(bigbuf_arcbufs[j]);
 				} else {
 					dmu_return_arcbuf(
@@ -4285,7 +4283,7 @@ ztest_dmu_read_write_zcopy(ztest_ds_t *zd, uint64_t id)
 		}
 		for (off = bigoff, j = 0; j < s; j++, off += chunksize) {
 			dmu_buf_t *dbt;
-			if (i != 5) {
+			if (i != 5 || chunksize < (SPA_MINBLOCKSIZE * 2)) {
 				bcopy((caddr_t)bigbuf + (off - bigoff),
 				    bigbuf_arcbufs[j]->b_data, chunksize);
 			} else {
@@ -4302,7 +4300,7 @@ ztest_dmu_read_write_zcopy(ztest_ds_t *zd, uint64_t id)
 				VERIFY(dmu_buf_hold(os, bigobj, off,
 				    FTAG, &dbt, DMU_READ_NO_PREFETCH) == 0);
 			}
-			if (i != 5) {
+			if (i != 5 || chunksize < (SPA_MINBLOCKSIZE * 2)) {
 				dmu_assign_arcbuf(bonus_db, off,
 				    bigbuf_arcbufs[j], tx);
 			} else {
@@ -4955,6 +4953,9 @@ ztest_dsl_prop_get_set(ztest_ds_t *zd, uint64_t id)
 		(void) ztest_dsl_prop_set_uint64(zd->zd_name, proplist[p],
 		    ztest_random_dsl_prop(proplist[p]), (int)ztest_random(2));
 
+	VERIFY0(ztest_dsl_prop_set_uint64(zd->zd_name, ZFS_PROP_RECORDSIZE,
+	    ztest_random_blocksize(), (int)ztest_random(2)));
+
 	(void) rw_unlock(&ztest_name_lock);
 }
 
@@ -5377,6 +5378,31 @@ ztest_fault_inject(ztest_ds_t *zd, uint64_t id)
 	fsize = lseek(fd, 0, SEEK_END);
 
 	while (--iters != 0) {
+		/*
+		 * The offset must be chosen carefully to ensure that
+		 * we do not inject a given logical block with errors
+		 * on two different leaf devices, because ZFS can not
+		 * tolerate that (if maxfaults==1).
+		 *
+		 * We divide each leaf into chunks of size
+		 * (# leaves * SPA_MAXBLOCKSIZE * 4).  Within each chunk
+		 * there is a series of ranges to which we can inject errors.
+		 * Each range can accept errors on only a single leaf vdev.
+		 * The error injection ranges are separated by ranges
+		 * which we will not inject errors on any device (DMZs).
+		 * Each DMZ must be large enough such that a single block
+		 * can not straddle it, so that a single block can not be
+		 * a target in two different injection ranges (on different
+		 * leaf vdevs).
+		 *
+		 * For example, with 3 leaves, each chunk looks like:
+		 *    0 to  32M: injection range for leaf 0
+		 *  32M to  64M: DMZ - no injection allowed
+		 *  64M to  96M: injection range for leaf 1
+		 *  96M to 128M: DMZ - no injection allowed
+		 * 128M to 160M: injection range for leaf 2
+		 * 160M to 192M: DMZ - no injection allowed
+		 */
 		offset = ztest_random(fsize / (leaves << bshift)) *
 		    (leaves << bshift) + (leaf << bshift) +
 		    (ztest_random(1ULL << (bshift - 1)) & -8ULL);
@@ -5510,7 +5536,7 @@ ztest_ddt_repair(ztest_ds_t *zd, uint64_t id)
 	ztest_pattern_set(buf, psize, ~pattern);
 
 	(void) zio_wait(zio_rewrite(NULL, spa, 0, &blk,
-	    buf, psize, NULL, NULL, ZIO_PRIORITY_SYNC_WRITE,
+		buf, psize, NULL, NULL, NULL, ZIO_PRIORITY_SYNC_WRITE,
 	    ZIO_FLAG_CANFAIL | ZIO_FLAG_INDUCE_DAMAGE, NULL));
 
 	zio_buf_free(buf, psize);
@@ -5836,12 +5862,9 @@ ztest_execute(int test, ztest_info_t *zi, uint64_t id)
 	atomic_add_64(&zc->zc_count, 1);
 	atomic_add_64(&zc->zc_time, functime);
 
-	if (ztest_opts.zo_verbose >= 4) {
-		Dl_info dli;
-		(void) dladdr((void *)zi->zi_func, &dli);
+	if (ztest_opts.zo_verbose >= 4)
 		(void) printf("%6.2f sec in %s\n",
-		    (double)functime / NANOSEC, dli.dli_sname);
-	}
+		    (double)functime / NANOSEC, zi->zi_funcname);
 }
 
 static void *
@@ -6200,9 +6223,6 @@ ztest_run(ztest_shared_t *zs)
 	zs->zs_alloc = metaslab_class_get_alloc(spa_normal_class(spa));
 	zs->zs_space = metaslab_class_get_space(spa_normal_class(spa));
 
-	if (ztest_opts.zo_verbose >= 3)
-		zfs_dbgmsg_print(FTAG);
-
 	umem_free(tid, ztest_opts.zo_threads * sizeof (kt_did_t));
 
 	/* Kill the resume thread */
@@ -6215,7 +6235,7 @@ ztest_run(ztest_shared_t *zs)
 	 * spa_close() should wait for it to complete.
 	 */
 	for (object = 1; object < 50; object++)
-		dmu_prefetch(spa->spa_meta_objset, object, 0, 1ULL << 20);
+		dmu_prefetch(spa->spa_meta_objset, object, 0, 0, 1ULL << 20, ZIO_PRIORITY_SYNC_READ);
 
 	/* Verify that at least one commit cb was called in a timely fashion */
 	if (zc_cb_counter >= ZTEST_COMMIT_CB_MIN_REG)
@@ -6815,15 +6835,12 @@ main(int argc, char **argv)
 			(void) printf("%7s %9s   %s\n",
 			    "-----", "----", "--------");
 			for (f = 0; f < ZTEST_FUNCS; f++) {
-				Dl_info dli;
-
 				zi = &ztest_info[f];
 				zc = ZTEST_GET_SHARED_CALLSTATE(f);
 				print_time(zc->zc_time, timebuf);
-				(void) dladdr((void *)zi->zi_func, &dli);
 				(void) printf("%7llu %9s   %s\n",
 				    (u_longlong_t)zc->zc_count, timebuf,
-				    dli.dli_sname);
+				    zi->zi_funcname);
 			}
 			(void) printf("\n");
 		}

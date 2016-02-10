@@ -46,7 +46,7 @@ dsl_keychain_create_obj(dsl_dir_t *dd, dmu_tx_t *tx)
 {
 	objset_t *mos = dd->dd_pool->dp_meta_objset;
 	dmu_buf_will_dirty(dd->dd_dbuf, tx);
-	dd->dd_phys->dd_keychain_obj = zap_create_flags(mos,
+	dsl_dir_phys(dd)->dd_keychain_obj = zap_create_flags(mos,
 	    0, ZAP_FLAG_HASH64 | ZAP_FLAG_UINT64_KEY,
 	    DMU_OT_DSL_KEYCHAIN, SPA_MINBLOCKSHIFT, SPA_MINBLOCKSHIFT,
 	    DMU_OT_NONE, 0, tx);
@@ -57,8 +57,8 @@ dsl_keychain_set_key(dsl_dir_t *dd, dmu_tx_t *tx,
     caddr_t wkeybuf, size_t wkeylen, uint64_t rekey_date)
 {
 	objset_t *mos = dd->dd_pool->dp_meta_objset;
-	uint64_t keychain_zapobj = dd->dd_phys->dd_keychain_obj;
-	uint64_t props_zapobj = dd->dd_phys->dd_props_zapobj;
+	uint64_t keychain_zapobj = dsl_dir_phys(dd)->dd_keychain_obj;
+	uint64_t props_zapobj = dsl_dir_phys(dd)->dd_props_zapobj;
 
 	ASSERT(keychain_zapobj != 0);
 	VERIFY(zap_update_uint64(mos, keychain_zapobj,
@@ -73,18 +73,18 @@ dsl_keychain_clone_phys(dsl_dataset_t *src, dsl_dir_t *dd,
     dmu_tx_t *tx, zcrypt_key_t *dwkey)
 {
 	objset_t *mos = dd->dd_pool->dp_meta_objset;
-	uint64_t keychain = dd->dd_phys->dd_keychain_obj;
+	uint64_t keychain = dsl_dir_phys(dd)->dd_keychain_obj;
 	caddr_t wrappedkey = NULL;
 	size_t wkeylen = 0;
 	zcrypt_keystore_node_t *kn;
 	zcrypt_keychain_node_t *n;
-	uint64_t newest_txg = src->ds_phys->ds_creation_txg;
+	uint64_t newest_txg = dsl_dataset_phys(src)->ds_creation_txg;
 
 	kn = zcrypt_keystore_find_node(dsl_dataset_get_spa(src),
 	    src->ds_object, B_FALSE);
 	if (kn == NULL) {
 		kn = zcrypt_keystore_find_node(dsl_dataset_get_spa(src),
-		    src->ds_dir->dd_phys->dd_head_dataset_obj, B_FALSE);
+				 dsl_dir_phys(src->ds_dir)->dd_head_dataset_obj, B_FALSE);
 	}
 	ASSERT(kn != NULL);
 	ASSERT(dwkey != NULL);
@@ -166,7 +166,7 @@ dsl_crypto_key_create(dsl_dir_t *dd, dsl_dataset_phys_t *dsphys,
 	    dsphys->ds_creation_txg, dslkey);
 	if (ctx->dcc_salt != 0) {
 		objset_t *mos = dd->dd_pool->dp_meta_objset;
-		uint64_t props_zapobj = dd->dd_phys->dd_props_zapobj;
+		uint64_t props_zapobj = dsl_dir_phys(dd)->dd_props_zapobj;
 
 		error = zap_update(mos, props_zapobj,
 		    zfs_prop_to_name(ZFS_PROP_SALT), 8, 1,
@@ -234,7 +234,7 @@ dsl_crypto_key_clone(dsl_dir_t *dd, dsl_dataset_phys_t *dsphys,
 
 	if (ctx->dcc_salt != 0) {
 		objset_t *mos = dd->dd_pool->dp_meta_objset;
-		uint64_t props_zapobj = dd->dd_phys->dd_props_zapobj;
+		uint64_t props_zapobj = dsl_dir_phys(dd)->dd_props_zapobj;
 
 		error = zap_update(mos, props_zapobj,
 		    zfs_prop_to_name(ZFS_PROP_SALT), 8, 1,
@@ -284,8 +284,8 @@ dsl_dataset_keystatus(dsl_dataset_t *ds, boolean_t dp_config_rwlock_held)
 	 */
 	if (ds == NULL)
 		return (ZFS_CRYPT_KEY_UNAVAILABLE);
-	if (ds->ds_dir != NULL && ds->ds_dir->dd_phys != NULL &&
-	    ds->ds_dir->dd_phys->dd_keychain_obj == 0) {
+	if (ds->ds_dir != NULL && dsl_dir_phys(ds->ds_dir) != NULL &&
+	    dsl_dir_phys(ds->ds_dir)->dd_keychain_obj == 0) {
 		return (ZFS_CRYPT_KEY_NONE);
 	}
 	if (zcrypt_keystore_find_node(dsl_dataset_get_spa(ds),
@@ -620,7 +620,7 @@ dsl_crypto_key_new(const char *dsname)
 	    zio_crypt_select_wrap(os->os_crypt)) == 0);
 
 	error = dsl_sync_task(spa->spa_name, dsl_crypto_key_new_check,
-	    dsl_crypto_key_new_sync, &arg, 1);
+			  dsl_crypto_key_new_sync, &arg, 1, ZFS_SPACE_CHECK_NONE);
 
 	kmem_free(arg.kn_wkeybuf, arg.kn_wkeylen);
 
@@ -685,7 +685,7 @@ dsl_crypto_key_change_sync(void *arg, dmu_tx_t *tx)
 	ASSERT(RW_WRITE_HELD(&ds->ds_dir->dd_pool->dp_config_rwlock));
 
 	mos = ds->ds_dir->dd_pool->dp_meta_objset;
-	keychain_zapobj = ds->ds_dir->dd_phys->dd_keychain_obj;
+	keychain_zapobj = dsl_dir_phys(ds->ds_dir)->dd_keychain_obj;
 
 	/*
 	 * To allow for the case were the keychains of child datasets
@@ -786,7 +786,7 @@ dsl_crypto_key_change_find(const char *dsname, void *arg)
     ca->ca_ds = ds;
     err = dsl_sync_task(dsname, dsl_crypto_key_change_check,
                           dsl_crypto_key_change_sync, arg,
-                          1);
+						1, ZFS_SPACE_CHECK_NONE);
 
 	kcn->kc_ds = ds;
 	list_insert_tail(&ca->ca_nodes, kcn);
@@ -913,7 +913,7 @@ dsl_keychain_load_dd(dsl_dir_t *dd, uint64_t dsobj,
 	zap_cursor_t zc;
 	zap_attribute_t za;
 	objset_t *mos = dd->dd_pool->dp_meta_objset;
-	uint64_t keychain_zapobj = dd->dd_phys->dd_keychain_obj;
+	uint64_t keychain_zapobj = dsl_dir_phys(dd)->dd_keychain_obj;
 	zcrypt_key_t *txgkey;
 	zcrypt_keystore_node_t *skn;
 	caddr_t wrappedkey;

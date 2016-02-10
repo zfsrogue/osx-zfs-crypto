@@ -21,7 +21,7 @@ https://github.com/openzfsonosx/zfs
 ** zfs.kext depends upon spl.kext, so start with that repository:
 https://github.com/openzfsonosx/spl.git
 
-It is tested primarily on Mac OS X Mavericks.
+It is tested primarily on Mac OS X Yosemite.
 
 
 Please note that 'llvm-gcc' or 'clang' should be used for compiling the KEXTs.

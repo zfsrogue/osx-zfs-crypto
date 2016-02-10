@@ -251,7 +251,8 @@ zfs_dirent_lock(zfs_dirlock_t **dlpp, znode_t *dzp, char *name, znode_t **zpp,
 			    KM_SLEEP);
 			cv_init(&dl->dl_cv, NULL, CV_DEFAULT, NULL);
 			dl->dl_name = (char *)(dl + 1);
-			bcopy(name, dl->dl_name, namesize);
+			//bcopy(name, dl->dl_name, namesize);
+			strlcpy(dl->dl_name, name, namesize);
 			dl->dl_sharecnt = 0;
 			dl->dl_namelock = 0;
 			dl->dl_namesize = namesize;
@@ -316,7 +317,13 @@ zfs_dirent_lock(zfs_dirlock_t **dlpp, znode_t *dzp, char *name, znode_t **zpp,
 			zfs_dirent_unlock(dl);
 			return (SET_ERROR(EEXIST));
 		}
+#ifdef APPLE_SA_RECOVER
+		zfsvfs->z_recover_parent = dzp->z_id;
+#endif /* APPLE_SA_RECOVER */
 		error = zfs_zget(zfsvfs, zoid, zpp);
+#ifdef APPLE_SA_RECOVER
+		zfsvfs->z_recover_parent = 0;
+#endif /* APPLE_SA_RECOVER */
 
 		if (error) {
 			zfs_dirent_unlock(dl);
@@ -458,12 +465,18 @@ void
 zfs_unlinked_add(znode_t *zp, dmu_tx_t *tx)
 {
 	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
+	int err;
 
 	ASSERT(zp->z_unlinked);
 	ASSERT(zp->z_links == 0);
 
-	VERIFY3U(0, ==,
-	    zap_add_int(zfsvfs->z_os, zfsvfs->z_unlinkedobj, zp->z_id, tx));
+
+	if (( err = zap_add_int(zfsvfs->z_os, zfsvfs->z_unlinkedobj, zp->z_id, tx))
+		!= 0) {
+		zfs_panic_recover("zfs: zfs_unlinked_add(id %llu) failed to add to unlinked list: %d\n",
+						  zp->z_id,
+						  err);
+	}
 }
 
 
@@ -473,7 +486,7 @@ zfs_unlinked_add(znode_t *zp, dmu_tx_t *tx)
 * (force) umounted the file system.
 */
 void
-zfs_unlinked_drain_internal(zfsvfs_t *zfsvfs)
+zfs_unlinked_drain(zfsvfs_t *zfsvfs)
 {
         zap_cursor_t        zc;
         zap_attribute_t zap;
@@ -516,7 +529,7 @@ zfs_unlinked_drain_internal(zfsvfs_t *zfsvfs)
 
                 VN_RELE(ZTOV(zp));
 
-#ifdef __APPLE__
+#ifdef __OPPLE__
 				/* Call vnop_reclaim now to keep the unlinked order */
 				vnode_recycle(ZTOV(zp));
 #endif
@@ -530,44 +543,9 @@ zfs_unlinked_drain_internal(zfsvfs_t *zfsvfs)
 
         }
         zap_cursor_fini(&zc);
-        printf("ZFS: unlinked drain completed (%llu).\n", entries);
+        if (entries) printf("ZFS: unlinked drain completed (%llu).\n", entries);
 
 }
-
-
-static void zfs_unlinked_drain_start(void *arg)
-{
-	zfsvfs_t *zfsvfs = (zfsvfs_t *)arg;
-	zfs_unlinked_drain_internal(zfsvfs);
-	thread_exit();
-}
-
-void
-zfs_unlinked_drain(zfsvfs_t *zfsvfs)
-{
-        zap_cursor_t        zc;
-        zap_attribute_t zap;
-		uint64_t entries=0;
-
-        /*
-         * Interate over the contents of the unlinked set.
-         */
-        for (zap_cursor_init(&zc, zfsvfs->z_os, zfsvfs->z_unlinkedobj);
-         zap_cursor_retrieve(&zc, &zap) == 0;
-         zap_cursor_advance(&zc)) {
-			entries++;
-        }
-        zap_cursor_fini(&zc);
-
-        printf("ZFS: unlinked drain (Total entries: %llu).\n", entries);
-
-		if (!entries) return;
-
-		(void) thread_create(NULL, 0, zfs_unlinked_drain_start, zfsvfs, 0, &p0,
-							 TS_RUN, minclsyspri);
-
-}
-
 
 
 
@@ -598,8 +576,9 @@ zfs_purgedir(znode_t *dzp)
 	for (zap_cursor_init(&zc, zfsvfs->z_os, dzp->z_id);
 	    (error = zap_cursor_retrieve(&zc, &zap)) == 0;
 	    zap_cursor_advance(&zc)) {
-		error = zfs_zget(zfsvfs,
-		    ZFS_DIRENT_OBJ(zap.za_first_integer), &xzp);
+		error = zfs_zget_ext(zfsvfs,
+							 ZFS_DIRENT_OBJ(zap.za_first_integer), &xzp,
+							 ZGET_FLAG_WITHOUT_VNODE);
 		if (error) {
 #ifdef __APPLE__
 			if (error == ENXIO) {
@@ -611,10 +590,13 @@ zfs_purgedir(znode_t *dzp)
 			continue;
 		}
 
-/*
+#ifdef __APPLE__
+		ASSERT(S_ISREG(xzp->z_mode) ||
+			   S_ISLNK(xzp->z_mode));
+#else
 	    ASSERT((ZTOV(xzp)->v_type == VREG) ||
-		    (ZTOV(xzp)->v_type == VLNK));
-*/
+			   (ZTOV(xzp)->v_type == VLNK));
+#endif
 
 		tx = dmu_tx_create(zfsvfs->z_os);
 		dmu_tx_hold_sa(tx, dzp->z_sa_hdl, B_FALSE);
@@ -628,7 +610,16 @@ zfs_purgedir(znode_t *dzp)
 		if (error) {
 			dmu_tx_abort(tx);
 			//VN_RELE(ZTOV(xzp)); // async
+#ifdef __APPLE__
+			if (ZTOV(xzp) == NULL) {
+				zfs_zinactive(xzp);
+			} else {
+				VN_RELE_ASYNC(ZTOV(xzp), dsl_pool_vnrele_taskq(dmu_objset_pool(zfsvfs->z_os)));
+			}
+#else
 			VN_RELE_ASYNC(ZTOV(xzp), dsl_pool_vnrele_taskq(dmu_objset_pool(zfsvfs->z_os)));
+#endif
+
 			skipped += 1;
 			continue;
 		}
@@ -641,8 +632,15 @@ zfs_purgedir(znode_t *dzp)
 			skipped += 1;
 		dmu_tx_commit(tx);
 
-		//VN_RELE(ZTOV(xzp)); // async
+#ifdef __APPLE__
+		if (ZTOV(xzp) == NULL) {
+			zfs_zinactive(xzp);
+		} else {
+			VN_RELE_ASYNC(ZTOV(xzp), dsl_pool_vnrele_taskq(dmu_objset_pool(zfsvfs->z_os)));
+		}
+#else
 		VN_RELE_ASYNC(ZTOV(xzp), dsl_pool_vnrele_taskq(dmu_objset_pool(zfsvfs->z_os)));
+#endif
 	}
 	zap_cursor_fini(&zc);
 	if (error != ENOENT)
@@ -716,7 +714,8 @@ zfs_rmnode(znode_t *zp)
 	error = sa_lookup(zp->z_sa_hdl, SA_ZPL_XATTR(zfsvfs),
 		&xattr_obj, sizeof (xattr_obj));
 	if (error == 0 && xattr_obj) {
-		error = zfs_zget(zfsvfs, xattr_obj, &xzp);
+		error = zfs_zget_ext(zfsvfs, xattr_obj, &xzp,
+		    ZGET_FLAG_WITHOUT_VNODE);
 		ASSERT(error == 0);
 	}
 
@@ -768,8 +767,14 @@ zfs_rmnode(znode_t *zp)
 
 	dmu_tx_commit(tx);
 out:
-	if (xzp)
-		VN_RELE_ASYNC(ZTOV(xzp), dsl_pool_vnrele_taskq(dmu_objset_pool(zfsvfs->z_os)));
+	if (xzp) {
+		/* Only release object if we are the only user */
+		if (ZTOV(xzp) == NULL)
+			zfs_zinactive(xzp);
+		else
+			VN_RELE_ASYNC(ZTOV(xzp), dsl_pool_vnrele_taskq(
+			    dmu_objset_pool(zfsvfs->z_os)));
+	}
 }
 
 static uint64_t
@@ -792,11 +797,19 @@ zfs_link_create(zfs_dirlock_t *dl, znode_t *zp, dmu_tx_t *tx, int flag)
 	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
 	vnode_t *vp = ZTOV(zp);
 	uint64_t value;
+#ifdef __APPLE__
+	/* OS X - don't access the vnode here since it might not be attached. */
+	int zp_is_dir = S_ISDIR(zp->z_mode);
+#else
 	int zp_is_dir = (vnode_isdir(vp));
+#endif
 	sa_bulk_attr_t bulk[5];
 	uint64_t mtime[2], ctime[2];
 	int count = 0;
 	int error;
+#ifdef __APPLE__
+	uint64_t addtime[2];
+#endif
 
 	mutex_enter(&zp->z_lock);
 
@@ -830,15 +843,13 @@ zfs_link_create(zfs_dirlock_t *dl, znode_t *zp, dmu_tx_t *tx, int flag)
 			 * same directory should not update the entry. This case is
 			 * handled in zfs_rename().
 			 */
-	if (!(flag & ZRENAMING)) {
+	if (!(flag & ZRENAMING) &&
+		zfsvfs->z_use_sa == B_TRUE) {
 		timestruc_t	now;
-		uint64_t addtime[2];
 		gethrestime(&now);
 		ZFS_TIME_ENCODE(&now, addtime);
 		SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_ADDTIME(zfsvfs), NULL,
 		    addtime, sizeof (addtime));
-		dprintf("ZFS: Updating ADDEDTIME on zp/vp %p/%p: %llu\n",
-				szp, ZTOV(szp), addtime[0]);
 	}
 #endif
 	error = sa_bulk_update(zp->z_sa_hdl, bulk, count, tx);
@@ -913,7 +924,12 @@ zfs_link_destroy(zfs_dirlock_t *dl, znode_t *zp, dmu_tx_t *tx, int flag,
 	znode_t *dzp = dl->dl_dzp;
 	zfsvfs_t *zfsvfs = dzp->z_zfsvfs;
 	vnode_t *vp = ZTOV(zp);
+#ifdef __APPLE__
+	/* OS X - don't access the vnode here since it might not be attached. */
+	int zp_is_dir = S_ISDIR(zp->z_mode);
+#else
 	int zp_is_dir = vnode_isdir((vp));
+#endif
 	boolean_t unlinked = B_FALSE;
 	sa_bulk_attr_t bulk[5];
 	uint64_t mtime[2], ctime[2];
@@ -924,12 +940,15 @@ zfs_link_destroy(zfs_dirlock_t *dl, znode_t *zp, dmu_tx_t *tx, int flag,
 		dnlc_remove(ZTOV(dzp), dl->dl_name);
 
 	if (!(flag & ZRENAMING)) {
-		if (vn_vfswlock(vp))		/* prevent new mounts on zp */
-			return ((EBUSY));
 
-		if (vn_ismntpt(vp)) {		/* don't remove mount point */
-			vn_vfsunlock(vp);
-			return ((EBUSY));
+		if (vp) {
+			if (vn_vfswlock(vp))		/* prevent new mounts on zp */
+				return ((EBUSY));
+
+			if (vn_ismntpt(vp)) {		/* don't remove mount point */
+				vn_vfsunlock(vp);
+				return ((EBUSY));
+			}
 		}
 
 		mutex_enter(&zp->z_lock);
@@ -953,8 +972,9 @@ zfs_link_destroy(zfs_dirlock_t *dl, znode_t *zp, dmu_tx_t *tx, int flag,
 		}
 
 		if (zp->z_links <= zp_is_dir) {
-			zfs_panic_recover("zfs: link count on vnode %p is %u, "
+			zfs_panic_recover("zfs: link count on vnode %p objID %llu is %u, "
 			    "should be at least %u", zp->z_vnode,
+							  zp->z_id,
 			    (int)zp->z_links,
 			    zp_is_dir + 1);
 			zp->z_links = zp_is_dir + 1;
@@ -1086,7 +1106,12 @@ zfs_make_xattrdir(znode_t *zp, vattr_t *vap, vnode_t **xvpp, cred_t *cr)
 
 	zfs_acl_ids_free(&acl_ids);
 	dmu_tx_commit(tx);
-
+#ifdef __APPLE__
+	/*
+	 * Obtain and attach the vnode after committing the transaction
+	 */
+	zfs_znode_getvnode(xzp, zfsvfs);
+#endif
 	*xvpp = ZTOV(xzp);
 
 	return (0);

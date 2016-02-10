@@ -40,7 +40,7 @@ AC_CONFIG_MACRO_DIR([config])
 AC_CANONICAL_SYSTEM
 AM_MAINTAINER_MODE
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
-AM_INIT_AUTOMAKE([$ZFS_META_NAME], [$ZFS_META_VERSION])
+AM_INIT_AUTOMAKE
 AC_CONFIG_HEADERS([zfs_config.h], [
 	(mv zfs_config.h zfs_config.h.tmp &&
 	awk -f ${ac_srcdir}/config/config.awk zfs_config.h.tmp >zfs_config.h &&
@@ -52,6 +52,7 @@ dnl if $CFLAGS is blank
 cflags_save="$CFLAGS"
 AC_PROG_CC
 AC_PROG_CXX
+AC_PROG_OBJCXX
 CFLAGS="$cflags_save"
 AC_PROG_LIBTOOL
 AM_PROG_CC_C_O
@@ -70,8 +71,6 @@ fi
 
 AC_CONFIG_FILES([
 	Makefile
-	dracut/Makefile
-	dracut/90zfs/Makefile
 	udev/Makefile
 	udev/rules.d/Makefile
 	etc/Makefile
@@ -129,11 +128,15 @@ AC_CONFIG_FILES([
 	cmd/vdev_id/Makefile
 	cmd/arcstat/Makefile
 	cmd/dbufstat/Makefile
+	cmd/arc_summary/Makefile
 	cmd/zed/Makefile
 	cmd/InvariantDisks/Makefile
 	cmd/InvariantDisks/InvariantDisks/Makefile
 	contrib/Makefile
 	contrib/bash_completion.d/Makefile
+	contrib/dracut/Makefile
+	contrib/dracut/90zfs/Makefile
+	contrib/initramfs/Makefile
 	module/Makefile
 	module/avl/Makefile
 	module/nvpair/Makefile
@@ -153,10 +156,10 @@ AC_CONFIG_FILES([
 	scripts/zpool-config/Makefile
 	scripts/common.sh
 	rpm/Makefile
-	rpm/fedora/Makefile
-	rpm/fedora/zfs.spec
-	rpm/fedora/zfs-kmod.spec
-	rpm/fedora/zfs-dkms.spec
+	rpm/redhat/Makefile
+	rpm/redhat/zfs.spec
+	rpm/redhat/zfs-kmod.spec
+	rpm/redhat/zfs-dkms.spec
 	rpm/generic/Makefile
 	rpm/generic/zfs.spec
 	rpm/generic/zfs-kmod.spec

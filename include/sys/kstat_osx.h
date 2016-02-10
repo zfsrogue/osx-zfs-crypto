@@ -6,7 +6,6 @@ typedef struct osx_kstat {
 	kstat_named_t zpl_version;
 
 	kstat_named_t darwin_active_vnodes;
-	kstat_named_t darwin_reclaim_nodes;
 	kstat_named_t darwin_debug;
 	kstat_named_t darwin_ignore_negatives;
 	kstat_named_t darwin_ignore_positives;
@@ -23,6 +22,13 @@ typedef struct osx_kstat {
 	kstat_named_t arc_zfs_arc_p_min_shift;
 	kstat_named_t arc_zfs_disable_dup_eviction;
 	kstat_named_t arc_zfs_arc_average_blocksize;
+
+	kstat_named_t l2arc_write_max;
+	kstat_named_t l2arc_write_boost;
+	kstat_named_t l2arc_headroom;
+	kstat_named_t l2arc_headroom_boost;
+	kstat_named_t l2arc_feed_secs;
+	kstat_named_t l2arc_feed_min_ms;
 
 	kstat_named_t zfs_vdev_max_active;
 	kstat_named_t zfs_vdev_sync_read_min_active;
@@ -53,7 +59,6 @@ typedef struct osx_kstat {
 	kstat_named_t zfs_prefetch_disable;
 	kstat_named_t zfetch_max_streams;
 	kstat_named_t zfetch_min_sec_reap;
-	kstat_named_t zfetch_block_cap;
 	kstat_named_t zfetch_array_rd_sz;
 	kstat_named_t zfs_default_bs;
 	kstat_named_t zfs_default_ibs;
@@ -80,10 +85,16 @@ typedef struct osx_kstat {
 	kstat_named_t zio_injection_enabled;
 	kstat_named_t zvol_immediate_write_sz;
 
+	kstat_named_t l2arc_noprefetch;
+	kstat_named_t l2arc_feed_again;
+	kstat_named_t l2arc_norw;
+
 	kstat_named_t zfs_top_maxinflight;
 	kstat_named_t zfs_resilver_delay;
 	kstat_named_t zfs_scrub_delay;
 	kstat_named_t zfs_scan_idle;
+
+	kstat_named_t zfs_recover;
 
 
 } osx_kstat_t;
@@ -94,7 +105,6 @@ extern unsigned int zfs_vnop_ignore_negatives;
 extern unsigned int zfs_vnop_ignore_positives;
 extern unsigned int zfs_vnop_create_negatives;
 extern unsigned int zfs_vnop_skip_unlinked_drain;
-extern uint64_t vnop_num_reclaims;
 extern uint64_t vnop_num_vnodes;
 
 extern uint64_t zfs_arc_max;
@@ -106,6 +116,13 @@ extern int zfs_arc_shrink_shift;
 extern int zfs_arc_p_min_shift;
 extern int zfs_disable_dup_eviction;
 extern int zfs_arc_average_blocksize;
+
+extern uint64_t l2arc_write_max;
+extern uint64_t l2arc_write_boost;
+extern uint64_t l2arc_headroom;
+extern uint64_t l2arc_headroom_boost;
+extern uint64_t l2arc_feed_secs;
+extern uint64_t l2arc_feed_min_ms;
 
 extern uint32_t zfs_vdev_max_active;
 extern uint32_t zfs_vdev_sync_read_min_active;
@@ -130,7 +147,6 @@ extern hrtime_t zfs_delay_max_ns;
 extern int spa_asize_inflation;
 extern unsigned int	zfetch_max_streams;
 extern unsigned int	zfetch_min_sec_reap;
-extern unsigned int	zfetch_block_cap;
 extern int zfs_default_bs;
 extern int zfs_default_ibs;
 extern uint64_t metaslab_aliquot;
@@ -145,6 +161,10 @@ extern uint64_t metaslab_df_alloc_threshold;
 extern int metaslab_df_free_pct;
 extern ssize_t zvol_immediate_write_sz;
 
+extern boolean_t l2arc_noprefetch;
+extern boolean_t l2arc_feed_again;
+extern boolean_t l2arc_norw;
+
 extern int zfs_top_maxinflight;
 extern int zfs_resilver_delay;
 extern int zfs_scrub_delay;
@@ -154,5 +174,6 @@ int        kstat_osx_init(void);
 void       kstat_osx_fini(void);
 
 int arc_kstat_update(kstat_t *ksp, int rw);
+int arc_kstat_update_osx(kstat_t *ksp, int rw);
 
 #endif

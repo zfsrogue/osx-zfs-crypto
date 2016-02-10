@@ -52,13 +52,13 @@ struct dsl_pool;
 struct dmu_tx;
 struct dsl_scan;
 
-extern unsigned long zfs_dirty_data_max;
-extern unsigned long zfs_dirty_data_max_max;
-extern unsigned long zfs_dirty_data_sync;
+extern uint64_t zfs_dirty_data_max;
+extern uint64_t zfs_dirty_data_max_max;
+extern uint64_t zfs_dirty_data_sync;
 extern int zfs_dirty_data_max_percent;
 extern int zfs_dirty_data_max_max_percent;
 extern int zfs_delay_min_dirty_percent;
-extern unsigned long zfs_delay_scale;
+extern uint64_t zfs_delay_scale;
 
 /* These macros are for indexing into the zfs_all_blkstats_t. */
 #define	DMU_OT_DEFERRED	DMU_OT_NONE
@@ -163,8 +163,10 @@ void dsl_pool_mos_diduse_space(dsl_pool_t *dp,
     int64_t used, int64_t comp, int64_t uncomp);
 boolean_t dsl_pool_need_dirty_delay(dsl_pool_t *dp);
 void dsl_pool_config_enter(dsl_pool_t *dp, void *tag);
+void dsl_pool_config_enter_prio(dsl_pool_t *dp, void *tag);
 void dsl_pool_config_exit(dsl_pool_t *dp, void *tag);
 boolean_t dsl_pool_config_held(dsl_pool_t *dp);
+boolean_t dsl_pool_config_held_writer(dsl_pool_t *dp);
 
 taskq_t *dsl_pool_vnrele_taskq(dsl_pool_t *dp);
 

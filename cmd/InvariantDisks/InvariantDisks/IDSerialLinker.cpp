@@ -13,25 +13,20 @@
 #include "IDSerialLinker.hpp"
 
 #include "IDDiskArbitrationUtils.hpp"
-#include "IDFileUtils.hpp"
 
-#include <iostream>
 #include <string>
 #include <algorithm>
 
 namespace ID
 {
-	SerialLinker::SerialLinker(std::string base) :
-		m_base(std::move(base))
+	SerialLinker::SerialLinker(std::string base, ASLClient const & logger) :
+		BaseLinker(std::move(base), logger)
 	{
-		createPath(m_base);
 	}
-
-	static std::string prefixDevice = "IODeviceTree:/";
 
 	bool isDevice(DiskInformation const & di)
 	{
-		return di.mediaPath.substr(0, prefixDevice.size()) == prefixDevice;
+		return di.isDevice;
 	}
 
 	bool isWhole(DiskInformation const & di)
@@ -61,9 +56,13 @@ namespace ID
 	{
 		if (isDevice(di) && !isWhole(di))
 		{
-			size_t suffixStart = di.mediaPath.find_last_not_of("0123456789");
-			if (suffixStart != std::string::npos && di.mediaPath[suffixStart] == ':')
-				return di.mediaPath.substr(suffixStart);
+			size_t suffixStart = di.mediaBSDName.find_last_not_of("0123456789");
+			if (suffixStart != std::string::npos &&
+				suffixStart+1 < di.mediaBSDName.size() &&
+				di.mediaBSDName[suffixStart] == 's')
+			{
+				return ':' + di.mediaBSDName.substr(suffixStart+1);
+			}
 		}
 		return std::string();
 	}
@@ -91,7 +90,7 @@ namespace ID
 	{
 		std::string serial = formatSerial(di);
 		if (!serial.empty())
-			serial = m_base + "/" + serial;
+			serial = base() + "/" + serial;
 		return serial;
 	}
 
@@ -99,39 +98,7 @@ namespace ID
 	{
 		if (isDevice(di))
 		{
-			try
-			{
-				std::string serial = formatSerialPath(di);
-				if (serial.empty())
-					return;
-				std::string devicePath = "/dev/" + di.mediaBSDName;
-				std::cout << "Creating symlink: \"" << serial << "\" -> " << devicePath << std::endl;
-				createSymlink(serial, devicePath);
-			}
-			catch (std::exception const & e)
-			{
-				std::cerr << "Could not create symlink: " << e.what() << std::endl;
-			}
-		}
-	}
-
-	void SerialLinker::diskDisappeared(DADiskRef disk, DiskInformation const & di)
-	{
-		if (isDevice(di))
-		{
-			try
-			{
-				std::string serial = formatSerialPath(di);
-				if (serial.empty())
-					return;
-				std::string devicePath = "/dev/" + di.mediaBSDName;
-				std::cout << "Removing symlink: \"" << serial << "\"" << std::endl;
-				removeFSObject(serial);
-			}
-			catch (std::exception const & e)
-			{
-				std::cerr << "Could not remove symlink: " << e.what() << std::endl;
-			}
+			addLinkForDisk(formatSerialPath(di), di);
 		}
 	}
 

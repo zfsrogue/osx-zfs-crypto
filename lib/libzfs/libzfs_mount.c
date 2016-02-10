@@ -242,8 +242,7 @@ zfs_is_mountable(zfs_handle_t *zhp, char *buf, size_t buflen,
 	char sourceloc[ZFS_MAXNAMELEN];
 	zprop_source_t sourcetype;
 
-	if (!zfs_prop_valid_for_type(ZFS_PROP_MOUNTPOINT, zhp->zfs_type,
-	    B_FALSE))
+	if (!zfs_prop_valid_for_type(ZFS_PROP_MOUNTPOINT, zhp->zfs_type))
 		return (B_FALSE);
 
 	verify(zfs_prop_get(zhp, ZFS_PROP_MOUNTPOINT, buf, buflen,
@@ -605,8 +604,9 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 	struct stat buf;
 	char mountpoint[ZFS_MAXPROPLEN];
 	char mntopts[MNT_LINE_MAX];
+	char overlay[ZFS_MAXPROPLEN];
 	libzfs_handle_t *hdl = zhp->zfs_hdl;
-	int remount;
+	int remount = 0;
 
 	if (options == NULL) {
 		mntopts[0] = '\0';
@@ -680,6 +680,19 @@ zfs_mount(zfs_handle_t *zhp, const char *options, int flags)
 			    mountpoint));
 		}
 
+	}
+
+	/*
+	 * Overlay mounts are disabled by default but may be enabled
+	 * via the 'overlay' property or the 'zfs mount -O' option.
+	 */
+	if (!(flags & MS_OVERLAY)) {
+		if (zfs_prop_get(zhp, ZFS_PROP_OVERLAY, overlay,
+			    sizeof (overlay), NULL, NULL, 0, B_FALSE) == 0) {
+			if (strcmp(overlay, "on") == 0) {
+				flags |= MS_OVERLAY;
+			}
+		}
 	}
 
 	/*
@@ -815,33 +828,6 @@ unmount_one(libzfs_handle_t *hdl, const char *mountpoint, int flags)
                               dgettext(TEXT_DOMAIN, "cannot unmount '%s'"),
                     mountpoint));
     }
-#ifdef __APPLE__
-	/*
-	 * Temporary hack to remove Finder icons after unmount, until
-	 * mount wrappers work is complete.
-	 */
-	char *argv[7] = {
-	    "/usr/bin/osascript",
-		"-e",
-	    NULL,
-		NULL, NULL, NULL };
-	char *script = NULL;
-	const char *tail;
-
-	tail = strrchr(mountpoint, '/');
-	if (tail && *tail == '/') tail++;
-	else tail = mountpoint;
-
-	asprintf(&script,
-			 "tell application \"Finder\" to eject disk \"%s\"",
-			 tail);
-
-	argv[2] = (char *)script;
-	libzfs_run_process(argv[0], argv, 0);
-
-	free(script);
-
-#endif
 
 	return (0);
 }
@@ -1401,6 +1387,17 @@ mount_cb(zfs_handle_t *zhp, void *data)
 	}
 
 	if (zfs_prop_get_int(zhp, ZFS_PROP_CANMOUNT) == ZFS_CANMOUNT_NOAUTO) {
+		zfs_close(zhp);
+		return (0);
+	}
+
+	/*
+	 * If this filesystem is inconsistent and has a receive resume
+	 * token, we can not mount it.
+	 */
+	if (zfs_prop_get_int(zhp, ZFS_PROP_INCONSISTENT) &&
+	    zfs_prop_get(zhp, ZFS_PROP_RECEIVE_RESUME_TOKEN,
+	    NULL, 0, NULL, NULL, 0, B_TRUE) == 0) {
 		zfs_close(zhp);
 		return (0);
 	}

@@ -662,16 +662,16 @@ zcrypt_keystore_find_node(spa_t *spa, uint64_t dsobj,
 		rw_exit(&spa->spa_keystore->sk_lock);
 		need_lock = !dsl_pool_sync_context(dp) && !config_rwlock_held;
 		if (need_lock)
-			rw_enter(&dp->dp_config_rwlock, RW_READER);
+			rrw_enter(&dp->dp_config_rwlock, RW_READER, FTAG);
 		error = dsl_dataset_hold_obj(dp, dsobj, FTAG, &ds);
 		if (need_lock)
-			rw_exit(&dp->dp_config_rwlock);
+			rrw_exit(&dp->dp_config_rwlock, FTAG);
 		rw_enter(&spa->spa_keystore->sk_lock, RW_READER);
 
 		if (!error) {
 			if (dsl_dataset_is_snapshot(ds)) {
 				search.skn_os =
-				    ds->ds_dir->dd_phys->dd_head_dataset_obj;
+				    dsl_dir_phys(ds->ds_dir)->dd_head_dataset_obj;
 				found = avl_find(&spa->spa_keystore->sk_dslkeys,
 				    &search, NULL);
 			}
